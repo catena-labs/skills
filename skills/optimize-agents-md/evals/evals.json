@@ -1,0 +1,23 @@
+{
+  "skill_name": "optimize-agents-md",
+  "evals": [
+    {
+      "id": 1,
+      "name": "greenfield-hono",
+      "prompt": "I just started this Hono API project and I want Claude Code and Cursor to follow my conventions. Can you set this up for me?",
+      "expected_output": "A lean AGENTS.md (under 120 lines) that mentions bun (not npm), the actual test/lint/typecheck commands from package.json, and follows the primacy/recency anchoring pattern. A CLAUDE.md containing exactly @AGENTS.md."
+    },
+    {
+      "id": 2,
+      "name": "bloated-existing",
+      "prompt": "My CLAUDE.md is getting out of hand. Can you clean it up?",
+      "expected_output": "An aggressively pruned AGENTS.md (ideally 60-80 lines, definitely under 120) with the bloat removed: no directory trees, no style guide content, no personality instructions, no code snippets, no self-evident practices. The exact commands and failure-driven rules should survive. CLAUDE.md should become @AGENTS.md."
+    },
+    {
+      "id": 3,
+      "name": "monorepo-ts",
+      "prompt": "Please restructure the agent instructions for this monorepo following best practices. It's grown too big and mixes cross-cutting rules with package-specific guidance.",
+      "expected_output": "A lean root AGENTS.md with workspace-level commands and cross-cutting rules only, plus a package map pointing to nested files. Nested AGENTS.md files in apps/web, apps/api, and infra containing only package-specific rules (React/Vite, Hono/Zod, Pulumi respectively). Root CLAUDE.md should be @AGENTS.md. No duplication between root and nested files."
+    }
+  ]
+}
