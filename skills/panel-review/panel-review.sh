@@ -150,8 +150,16 @@ done
 # hint. Clean tree + PR exists → switch to --pr mode silently.
 if (( !TARGET_EXPLICIT )) && command -v gh >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    auto_pr_num="$(gh pr view --json number -q .number 2>/dev/null || true)"
-    if [[ -n "$auto_pr_num" ]]; then
+    # `gh pr view` returns the most-recent PR for the branch regardless of
+    # state (open/closed/merged). Without filtering on state we'd silently
+    # auto-switch a fresh review to a stale closed/merged PR — confusing
+    # and inconsistent with the README/SKILL.md which describe this as
+    # detecting an "open PR". Fetch state alongside number and only
+    # auto-switch when state is OPEN.
+    { read -r auto_pr_state; read -r auto_pr_num; } < <(
+      gh pr view --json state,number -q '.state, .number' 2>/dev/null || true
+    )
+    if [[ "$auto_pr_state" == "OPEN" && -n "$auto_pr_num" ]]; then
       has_uncommitted=0
       if ! git diff-index --quiet HEAD -- 2>/dev/null; then
         has_uncommitted=1
@@ -164,6 +172,8 @@ if (( !TARGET_EXPLICIT )) && command -v gh >/dev/null 2>&1 && command -v git >/d
         echo "panel-review: detected PR #$auto_pr_num for current branch, using --pr mode. Pass --uncommitted to override." >&2
         TARGET="pr:$auto_pr_num"
       fi
+    elif [[ -n "$auto_pr_num" ]]; then
+      echo "panel-review: branch has PR #$auto_pr_num (state: $auto_pr_state) — not auto-switching. Pass --pr $auto_pr_num explicitly to review it anyway." >&2
     fi
   fi
 fi
