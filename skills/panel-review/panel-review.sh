@@ -7,17 +7,28 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Two prompt templates:
+#   review.md     - mode-agnostic base prompt for diff-embedded targets
+#                   (uncommitted/staged/base/commit). The script appends a
+#                   `## Workspace` section that tells the panelist what
+#                   tool capabilities they actually have in this run.
+#   review-pr.md  - PR-specific instruction prompt; panelists run gh pr view
+#                   / gh pr diff / gh api comments themselves rather than
+#                   getting an embedded diff. Worktree section is also
+#                   appended by the script.
 PROMPT_TEMPLATE="$SCRIPT_DIR/prompts/review.md"
-PROMPT_TEMPLATE_DEEP="$SCRIPT_DIR/prompts/review-deep.md"
+PROMPT_TEMPLATE_PR="$SCRIPT_DIR/prompts/review-pr.md"
 
 # ----- Defaults -----
-TARGET="uncommitted"           # uncommitted | staged | base:<ref> | commit:<sha>
+TARGET="uncommitted"           # uncommitted | staged | base:<ref> | commit:<sha> | pr:<ref>
+TARGET_EXPLICIT=0              # set to 1 by any --uncommitted/--staged/--base/--commit/--pr flag
 FOCUS=""
 PANELISTS=()
 OUT_DIR=""
 TIMEOUT_SECS="${PANEL_REVIEW_TIMEOUT:-600}"
 MAX_DIFF_BYTES="${PANEL_REVIEW_MAX_DIFF_BYTES:-200000}"
 CHECKOUT_MODE=0
+INSTRUCTION_MODE=0             # 1 when target is a PR; panelists fetch via gh themselves
 
 # ----- Per-panelist model overrides (env) -----
 CODEX_MODEL="${CODEX_MODEL:-}"
@@ -25,21 +36,25 @@ CLAUDE_MODEL="${CLAUDE_MODEL:-}"
 OPENCODE_MODEL="${OPENCODE_MODEL:-}"
 OPENCODE_AGENT="${OPENCODE_AGENT:-plan}"
 # Opencode has no read-only/write toggle equivalent to codex's --sandbox; the choice
-# of agent decides what tools are available. In --checkout mode we swap to a writable
-# agent so panelists can edit and exec; override with OPENCODE_AGENT_DEEP if you have
-# a custom agent for this purpose.
+# of agent decides what tools are available. pr/base/commit reviews run worktree-
+# isolated with shell access (to run `gh`, tests, grep), so they swap to a writable
+# agent. Override OPENCODE_AGENT_DEEP if you have a custom agent for that purpose.
 OPENCODE_AGENT_DEEP="${OPENCODE_AGENT_DEEP:-build}"
 
 usage() {
   cat <<EOF
 Usage: panel-review.sh [target] [options]
 
-Targets (pick one, default --uncommitted):
+Targets (pick one; default tries to auto-detect a PR for the current branch via
+'gh pr view', falling back to --uncommitted):
   --uncommitted           Review staged + unstaged changes
   --staged                Review only staged changes
   --base BRANCH           Review BRANCH...HEAD
   --commit SHA            Review a single commit
-  --pr NUMBER             Review a GitHub PR via 'gh pr diff' (requires gh CLI)
+  --pr NUMBER             Review a GitHub PR. Panelists fetch the diff and
+                          existing review comments themselves via the 'gh' CLI
+                          (no embedded diff in the prompt — eliminates stale-base
+                          bugs and the MAX_DIFF_BYTES cap).
 
 Options:
   --focus TEXT            Optional focus / context for the reviewers
@@ -47,22 +62,33 @@ Options:
                           If not given, auto-detects every supported CLI on PATH.
   --out-dir DIR           Where to write captured outputs (default: mktemp).
   --timeout SECS          Per-panelist timeout (default: \$PANEL_REVIEW_TIMEOUT or 600).
-  --checkout              DEEP MODE: git-worktree-checkout the target ref into a
-                          tempdir and run panelists from inside it with WRITE/EXEC
-                          permissions so they can grep callers, run tests, and
-                          investigate downstream effects. Required for --pr/--base/
-                          --commit only; incompatible with --uncommitted/--staged.
-                          Strictly less safe than the default read-only fan-out:
-                          panelists can run arbitrary commands (network, fs, CPU).
   -h, --help              Show this help.
+
+Behavior by target:
+  --uncommitted/--staged  Local diff embedded in prompt; panelists run from your
+                          working tree with read-only / plan permissions.
+  --pr/--base/--commit    Panelists run worktree-isolated with write/exec perms
+                          (one throwaway git-worktree per panelist, pinned to the
+                          target ref). They can grep callers, run tests, and
+                          investigate downstream effects. The prompt forbids
+                          state-changing network actions (push, gh writes,
+                          installer side effects); the worktree is the only
+                          enforcement layer.
+
+  The legacy --checkout flag is now the default for committed targets and is
+  accepted as a deprecated no-op.
 
 Environment:
   CODEX_MODEL, CLAUDE_MODEL, OPENCODE_MODEL
                           Pass through a model name to that panelist.
-  OPENCODE_AGENT          opencode agent to use (default: plan, read-only).
+  OPENCODE_AGENT          opencode agent for --uncommitted/--staged (default: plan,
+                          read-only).
+  OPENCODE_AGENT_DEEP     opencode agent for --pr/--base/--commit (default: build,
+                          full shell access in the per-panelist worktree).
   PANEL_REVIEW_MAX_DIFF_BYTES
-                          Cap inline diff size (default 200000). If exceeded, the script
-                          aborts and asks you to narrow scope.
+                          Cap inline diff size (default 200000). Only applies to
+                          diff-embed targets (uncommitted/staged/base/commit). PR
+                          mode does not embed the diff and is not subject to this cap.
 
 Exit codes:
   0  every panelist returned successfully
@@ -76,11 +102,11 @@ die() { echo "panel-review: $*" >&2; exit 1; }
 # ----- Parse args -----
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --uncommitted) TARGET="uncommitted"; shift ;;
-    --staged)      TARGET="staged"; shift ;;
-    --base)        [[ $# -ge 2 ]] || die "--base needs a branch"; TARGET="base:$2"; shift 2 ;;
-    --commit)      [[ $# -ge 2 ]] || die "--commit needs a SHA"; TARGET="commit:$2"; shift 2 ;;
-    --pr)          [[ $# -ge 2 ]] || die "--pr needs a number or URL"; TARGET="pr:$2"; shift 2 ;;
+    --uncommitted) TARGET="uncommitted"; TARGET_EXPLICIT=1; shift ;;
+    --staged)      TARGET="staged"; TARGET_EXPLICIT=1; shift ;;
+    --base)        [[ $# -ge 2 ]] || die "--base needs a branch"; TARGET="base:$2"; TARGET_EXPLICIT=1; shift 2 ;;
+    --commit)      [[ $# -ge 2 ]] || die "--commit needs a SHA"; TARGET="commit:$2"; TARGET_EXPLICIT=1; shift 2 ;;
+    --pr)          [[ $# -ge 2 ]] || die "--pr needs a number or URL"; TARGET="pr:$2"; TARGET_EXPLICIT=1; shift 2 ;;
     --focus)       [[ $# -ge 2 ]] || die "--focus needs text"; FOCUS="$2"; shift 2 ;;
     --panelist)
       [[ $# -ge 2 ]] || die "--panelist needs a name"
@@ -95,7 +121,13 @@ while [[ $# -gt 0 ]]; do
       shift 2 ;;
     --out-dir)     [[ $# -ge 2 ]] || die "--out-dir needs a path"; OUT_DIR="$2"; shift 2 ;;
     --timeout)     [[ $# -ge 2 ]] || die "--timeout needs seconds"; TIMEOUT_SECS="$2"; shift 2 ;;
-    --checkout)    CHECKOUT_MODE=1; shift ;;
+    --checkout)
+      # Deprecated: PR / --base / --commit reviews now always run worktree-
+      # isolated with exec permissions. Accepting the flag silently as a no-op
+      # so existing scripts / muscle memory don't break; will be removed in a
+      # future release.
+      echo "panel-review: --checkout is now the default for pr/base/commit targets and is a no-op; the flag will be removed in a future release." >&2
+      shift ;;
     -h|--help)     usage; exit 0 ;;
     *) die "unknown argument: $1 (use -h for help)" ;;
   esac
@@ -103,16 +135,61 @@ done
 
 [[ -f "$PROMPT_TEMPLATE" ]] || die "missing prompt template at $PROMPT_TEMPLATE"
 
-# --checkout requires a target with a real ref to materialize. uncommitted/staged
-# already live in the user's working tree; the whole point of --checkout is to
-# isolate panelists in a dedicated worktree of a *different* ref.
+# ----- Auto-detect a PR for the current branch (only if no target was explicit) -----
+#
+# Why: when the user has a stale local main, a default `--base main` (or even
+# `--uncommitted`) diff disagrees with what's actually in the PR on GitHub —
+# panelists then flag commits that are already on the PR base as if they were
+# part of "this change." `gh pr view` (no ref) returns the PR for the current
+# branch when one exists, which is the source of truth a human reviewer would
+# look at.
+#
+# Tiebreaker for dirty working trees: if the user has uncommitted changes and a
+# PR exists, prefer reviewing the uncommitted work (active edits are usually
+# what they want feedback on) and just log the PR's existence with the override
+# hint. Clean tree + PR exists → switch to --pr mode silently.
+if (( !TARGET_EXPLICIT )) && command -v gh >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    auto_pr_num="$(gh pr view --json number -q .number 2>/dev/null || true)"
+    if [[ -n "$auto_pr_num" ]]; then
+      has_uncommitted=0
+      if ! git diff-index --quiet HEAD -- 2>/dev/null; then
+        has_uncommitted=1
+      elif [[ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]]; then
+        has_uncommitted=1
+      fi
+      if (( has_uncommitted )); then
+        echo "panel-review: detected PR #$auto_pr_num for current branch, but reviewing uncommitted changes (you have local edits). Pass --pr $auto_pr_num to review the PR instead." >&2
+      else
+        echo "panel-review: detected PR #$auto_pr_num for current branch, using --pr mode. Pass --uncommitted to override." >&2
+        TARGET="pr:$auto_pr_num"
+      fi
+    fi
+  fi
+fi
+
+# Mode flags are derived from the resolved target — there is no separate
+# user-facing "deep" / "checkout" toggle anymore:
+#
+#   - INSTRUCTION_MODE: the PR-fetch prompt (panelists run gh themselves
+#     instead of getting an embedded diff). PR targets only.
+#   - CHECKOUT_MODE: per-panelist throwaway worktree pinned to the target ref,
+#     and panelists run with workspace-write / bypass permissions so they can
+#     read code, grep callers, and run tests/build commands. Anything with a
+#     real ref to materialize: pr / base / commit. uncommitted and staged
+#     stay local-only because the changes don't yet exist as a ref.
+case "$TARGET" in
+  pr:*)            INSTRUCTION_MODE=1; CHECKOUT_MODE=1 ;;
+  base:*|commit:*) CHECKOUT_MODE=1 ;;
+esac
+
 if (( CHECKOUT_MODE )); then
-  [[ -f "$PROMPT_TEMPLATE_DEEP" ]] || die "missing deep prompt template at $PROMPT_TEMPLATE_DEEP"
-  case "$TARGET" in
-    pr:*|base:*|commit:*) ;;
-    *) die "--checkout requires --pr, --base, or --commit (incompatible with --uncommitted/--staged)" ;;
-  esac
-  command -v git >/dev/null 2>&1 || die "--checkout requires git on PATH"
+  command -v git >/dev/null 2>&1 || die "pr/base/commit reviews require git on PATH"
+fi
+
+if (( INSTRUCTION_MODE )); then
+  [[ -f "$PROMPT_TEMPLATE_PR" ]] || die "missing PR prompt template at $PROMPT_TEMPLATE_PR"
+  command -v gh >/dev/null 2>&1 || die "--pr requires the 'gh' CLI on PATH"
 fi
 
 # ----- Auto-detect panelists if none specified -----
@@ -130,10 +207,16 @@ else
   mkdir -p "$OUT_DIR"
 fi
 
-# ----- Build the diff -----
+# ----- Build the diff (or, for PR targets, just the metadata) -----
 DIFF_FILE="$OUT_DIR/diff.patch"
 TARGET_LABEL=""
 PR_BODY=""
+pr_ref=""
+pr_num=""
+pr_title=""
+pr_base=""
+pr_repo=""
+pr_url=""
 case "$TARGET" in
   uncommitted)
     {
@@ -157,21 +240,42 @@ case "$TARGET" in
     TARGET_LABEL="commit $sha"
     ;;
   pr:*)
+    # Instruction mode: don't pre-build the diff. Just resolve metadata once
+    # so the prompt header has a useful title and panelists know exactly which
+    # PR to fetch. Each panelist runs `gh pr diff` + comment APIs themselves
+    # against GitHub, so they always see the current remote state — no risk of
+    # the script's view drifting from what reviewers see in the GitHub UI.
     pr_ref="${TARGET#pr:}"
-    command -v gh >/dev/null 2>&1 || die "--pr requires the 'gh' CLI on PATH"
-    gh pr diff "$pr_ref" > "$DIFF_FILE" 2>"$OUT_DIR/gh.err" \
-      || die "gh pr diff $pr_ref failed: $(cat "$OUT_DIR/gh.err")"
-    pr_num="$(gh pr view "$pr_ref" --json number      -q .number      2>/dev/null || true)"
-    pr_title="$(gh pr view "$pr_ref" --json title     -q .title       2>/dev/null || true)"
-    pr_base="$(gh pr view "$pr_ref" --json baseRefName -q .baseRefName 2>/dev/null || true)"
-    PR_BODY="$(gh pr view "$pr_ref" --json body       -q .body        2>/dev/null || true)"
-    TARGET_LABEL="PR #${pr_num:-$pr_ref}"
+    gh_err="$OUT_DIR/gh-pr-view.err"
+    { read -r pr_num; read -r pr_title; read -r pr_base; read -r pr_url; } < <(
+      gh pr view "$pr_ref" \
+        --json number,title,baseRefName,url \
+        -q '.number, .title, .baseRefName, .url' \
+        2>"$gh_err" || true
+    )
+    if [[ -z "$pr_num" || -z "$pr_url" ]]; then
+      msg="--pr: failed to resolve PR metadata via 'gh pr view $pr_ref'"
+      [[ -s "$gh_err" ]] && msg+=$'\n  gh stderr: '"$(cat "$gh_err")"
+      die "$msg"
+    fi
+    # gh pr view does not expose baseRepository as a top-level json field;
+    # parse owner/repo out of the canonical PR URL instead. Works for github.com
+    # and GitHub Enterprise (the host portion is preserved up to `/owner/repo/pull/N`).
+    pr_repo="$(echo "$pr_url" | sed -E 's|^https?://[^/]+/||; s|/pull/.*$||')"
+    if [[ -z "$pr_repo" || "$pr_repo" == "$pr_url" ]]; then
+      die "--pr: could not parse owner/repo from PR url '$pr_url'"
+    fi
+    PR_BODY="$(gh pr view "$pr_ref" --json body -q .body 2>/dev/null || true)"
+    TARGET_LABEL="PR #${pr_num}"
     [[ -n "$pr_title" ]] && TARGET_LABEL+=" — $pr_title"
     [[ -n "$pr_base"  ]] && TARGET_LABEL+=" (base: $pr_base)"
     ;;
 esac
 
-[[ -s "$DIFF_FILE" ]] || die "diff is empty for target: $TARGET"
+# Diff-existence check only applies to embed targets. PR mode has no diff file.
+if (( !INSTRUCTION_MODE )); then
+  [[ -s "$DIFF_FILE" ]] || die "diff is empty for target: $TARGET"
+fi
 
 # ----- Optional: materialize one worktree per panelist for deep-mode -----
 #
@@ -287,36 +391,90 @@ if (( CHECKOUT_MODE )); then
   echo "panel-review: --checkout: ${#WORKTREES[@]} worktrees ready, panelists will run with WRITE/EXEC permissions in their own isolated checkouts" >&2
 fi
 
-DIFF_BYTES=$(wc -c < "$DIFF_FILE" | tr -d ' ')
-if (( DIFF_BYTES > MAX_DIFF_BYTES )); then
-  die "diff is $DIFF_BYTES bytes, exceeds cap $MAX_DIFF_BYTES.
+# Diff-size cap only applies when we're embedding the diff in the prompt.
+# Instruction-mode panelists fetch via gh and don't need the cap.
+if (( !INSTRUCTION_MODE )); then
+  DIFF_BYTES=$(wc -c < "$DIFF_FILE" | tr -d ' ')
+  if (( DIFF_BYTES > MAX_DIFF_BYTES )); then
+    die "diff is $DIFF_BYTES bytes, exceeds cap $MAX_DIFF_BYTES.
   Either narrow the scope (e.g. --commit, --staged, or a smaller --base range),
   or raise the cap, e.g.:  PANEL_REVIEW_MAX_DIFF_BYTES=$((DIFF_BYTES * 2)) bash $0 ...
   Caps exist because each panelist embeds the full diff in its prompt; very large
-  diffs blow context windows and cost a lot."
+  diffs blow context windows and cost a lot. (PR mode bypasses this — panelists
+  fetch the diff via gh themselves and never embed it.)"
+  fi
 fi
 
 # ----- Compose the per-run prompt -----
+#
+# Two template paths:
+#   - PR target:        prompts/review-pr.md  - instruction-style; panelists
+#                                               run gh themselves, no diff embedded.
+#   - everything else:  prompts/review.md     - mode-agnostic; the diff is
+#                                               embedded and the script-appended
+#                                               `## Workspace` section tells the
+#                                               panelist what tools they can use.
 ACTIVE_TEMPLATE="$PROMPT_TEMPLATE"
-(( CHECKOUT_MODE )) && ACTIVE_TEMPLATE="$PROMPT_TEMPLATE_DEEP"
+(( INSTRUCTION_MODE )) && ACTIVE_TEMPLATE="$PROMPT_TEMPLATE_PR"
 PROMPT_FILE="$OUT_DIR/prompt.md"
+
+# Substitute PR placeholders in the template body. We use bash parameter
+# expansion rather than sed so values containing slashes (URLs, owner/repo)
+# don't need escaping. Substitution happens whether or not the template uses
+# the placeholders — non-PR templates just have nothing to replace.
+TEMPLATE_BODY="$(cat "$ACTIVE_TEMPLATE")"
+if (( INSTRUCTION_MODE )); then
+  TEMPLATE_BODY="${TEMPLATE_BODY//\{\{PR_REF\}\}/$pr_ref}"
+  TEMPLATE_BODY="${TEMPLATE_BODY//\{\{PR_NUMBER\}\}/$pr_num}"
+  TEMPLATE_BODY="${TEMPLATE_BODY//\{\{PR_REPO\}\}/$pr_repo}"
+  TEMPLATE_BODY="${TEMPLATE_BODY//\{\{PR_URL\}\}/$pr_url}"
+fi
+
 {
-  cat "$ACTIVE_TEMPLATE"
+  printf '%s\n' "$TEMPLATE_BODY"
   echo
   echo "## Review target"
   echo
   echo "$TARGET_LABEL"
+  if (( INSTRUCTION_MODE )); then
+    echo
+    echo "## PR identifiers (use these in your gh commands)"
+    echo
+    echo "- PR ref (pass to \`gh pr view\` / \`gh pr diff\`): \`$pr_ref\`"
+    echo "- PR number: \`$pr_num\`"
+    echo "- Repo (owner/name) for \`gh api\` calls: \`$pr_repo\`"
+    [[ -n "$pr_url"  ]] && echo "- URL: $pr_url"
+    [[ -n "$pr_base" ]] && echo "- Base branch: \`$pr_base\`"
+  fi
+  echo
+  echo "## Workspace"
+  echo
   if (( CHECKOUT_MODE )); then
+    echo "You are running inside a dedicated git worktree pinned to this review's target ref"
+    echo "— the actual checkout, not a free-floating diff. You may:"
     echo
-    echo "## Workspace"
+    echo "- Read any file in the tree."
+    echo "- Grep / rg across the tree to find callers of changed symbols."
+    echo "- Edit files locally (the worktree is thrown away on exit)."
+    echo "- Run build / test / lint commands to investigate downstream effects."
+    echo "  Typical commands: \`pnpm test\` / \`npm test\` / \`cargo test\` / \`go test ./...\` /"
+    echo "  \`pytest\` / \`bundle exec rspec\`; type checkers like \`tsc --noEmit\`, \`mypy\`,"
+    echo "  \`cargo check\`. Check the repo's README / package.json / Makefile for the right one."
+    echo "- Install dev dependencies if a test runner needs them; bound test runs to ~3 minutes."
+    echo "- A failing test is a high-signal finding; surface it under Evidence."
     echo
-    echo "You are running inside a dedicated git worktree at the path of your current working"
-    echo "directory. This is the actual checkout of the target ref — not a free-floating diff."
-    echo "You may read any file, grep across the tree, and execute build / test / lint commands"
-    echo "to investigate downstream effects of the changes. Do not push, force-push, or perform"
-    echo "any network write that affects shared infrastructure (GitHub, Slack, Linear, package"
-    echo "registries, etc.). Local edits to the worktree are fine — the whole worktree is"
-    echo "thrown away when this run exits."
+    echo "Use that capability when it sharpens a finding. Do NOT do investigation theatre — only"
+    echo "run tools when they harden the report. Local writes inside the worktree are fine; the"
+    echo "external-network and GitHub-write rules in Hard Constraints still apply."
+  else
+    echo "You are running in the user's actual working tree with **read-only** access. You may:"
+    echo
+    echo "- Read any file using your built-in read tools (Read / Glob / Grep)."
+    echo "- Reason about the diff and the surrounding code."
+    echo
+    echo "Do NOT modify files, run tests, install packages, or execute shell commands that"
+    echo "change state. The \`Evidence:\` line in the finding shape is not meaningful in this"
+    echo "mode — leave it out."
   fi
   if [[ -n "$PR_BODY" ]]; then
     echo
@@ -330,12 +488,14 @@ PROMPT_FILE="$OUT_DIR/prompt.md"
     echo
     echo "$FOCUS"
   fi
-  echo
-  echo "## Diff"
-  echo
-  echo '```diff'
-  cat "$DIFF_FILE"
-  echo '```'
+  if (( !INSTRUCTION_MODE )); then
+    echo
+    echo "## Diff"
+    echo
+    echo '```diff'
+    cat "$DIFF_FILE"
+    echo '```'
+  fi
 } > "$PROMPT_FILE"
 
 # Read prompt once into memory so each child reads from there.
@@ -361,13 +521,16 @@ run_panelist() {
 
 # ----- Build each panelist's argv -----
 #
-# Default mode: lock each panelist down so the worst case is a panelist that read
-# more files than it needed to. Deep mode (CHECKOUT_MODE=1): panelists need to run
-# tests and edit files in the throwaway worktree, so each CLI's permission flag is
-# swapped for its most permissive non-interactive equivalent. Network/destructive
-# actions are gated by the prompt's hard constraints (see prompts/review-deep.md),
-# not by sandbox flags — there's no portable "no-network-write" mode across all four
-# CLIs.
+# Two permission tiers, keyed off CHECKOUT_MODE (which is set whenever the
+# target is pr/base/commit — i.e., anything with a real ref to materialize):
+#
+#   Local mode  (uncommitted/staged): read-only / plan. Panelists run from the
+#               user's working tree but cannot exec anything that writes.
+#   Worktree mode (pr/base/commit):   workspace-write / bypass / build agent.
+#               Panelists run inside a throwaway per-panelist worktree pinned
+#               to the target ref and can read code, grep callers, run
+#               tests/build commands. Network/destructive actions are gated by
+#               the prompt only — no sandbox-level guarantee.
 build_argv() {
   local name="$1"
   case "$name" in
@@ -382,6 +545,9 @@ build_argv() {
       ;;
     claude)
       if (( CHECKOUT_MODE )); then
+        # plan mode blocks Bash; gh / tests / grep need shell access, so we
+        # relax to bypassPermissions inside the worktree and rely on the
+        # prompt's hard constraints to forbid state-changing actions.
         argv=(claude -p --permission-mode bypassPermissions --output-format text --no-session-persistence)
       else
         argv=(claude -p --permission-mode plan --output-format text --no-session-persistence)
@@ -454,14 +620,58 @@ echo
 echo "- Target: $TARGET_LABEL"
 echo "- Panelists: ${PANELISTS[*]}"
 echo "- Outputs: \`$OUT_DIR\`"
+# Surface the PR URL and repo for PR targets so the synthesizer can wrap
+# `file:line` findings as tappable links via skills/panel-review/pr-line-url.sh
+# without re-parsing the prompt file. Only emitted in PR mode.
+[[ -n "$pr_url"  ]] && echo "- PR URL: $pr_url"
+[[ -n "$pr_repo" ]] && echo "- PR Repo: $pr_repo"
 [[ -n "$FOCUS" ]] && echo "- Focus: $FOCUS"
 echo
+
+# Extract the model id from a panelist's stdout. Each prompt instructs the
+# panelist to print `Model: <id>` as the very first line of its output, so the
+# script can label per-panelist sections / heartbeats with the actual model
+# that produced the review (e.g. "## codex / gpt-5.5 (exit 0)") without having
+# to introspect each CLI's default-model config.
+#
+# Falls back to the env var override if the panelist's first line isn't a
+# recognisable Model: line, then to a literal "?". `head -n1` so we never scan
+# beyond the first line — Model: appearing anywhere later in the output should
+# not influence the header.
+extract_model_label() {
+  local p="$1"
+  local fallback="$2"
+  local first_line=""
+  [[ -s "$OUT_DIR/$p.out" ]] && first_line="$(head -n1 "$OUT_DIR/$p.out" 2>/dev/null || true)"
+  case "$first_line" in
+    Model:*)
+      local label="${first_line#Model:}"
+      # Trim leading whitespace (single space is the common case after `Model:`).
+      label="${label# }"
+      label="${label#"${label%%[![:space:]]*}"}"
+      [[ -n "$label" ]] && { echo "$label"; return; }
+      ;;
+  esac
+  if [[ -n "$fallback" ]]; then
+    echo "$fallback"
+  else
+    echo "?"
+  fi
+}
 
 print_section() {
   local p="$1"
   local rc_val
   rc_val="$(cat "$OUT_DIR/$p.rc" 2>/dev/null || echo "?")"
-  echo "## ${p} (exit ${rc_val})"
+  local fallback_model=""
+  case "$p" in
+    codex)    fallback_model="$CODEX_MODEL" ;;
+    claude)   fallback_model="$CLAUDE_MODEL" ;;
+    opencode) fallback_model="$OPENCODE_MODEL" ;;
+  esac
+  local model_label
+  model_label="$(extract_model_label "$p" "$fallback_model")"
+  echo "## ${p} / ${model_label} (exit ${rc_val})"
   echo
   if [[ -s "$OUT_DIR/$p.out" ]]; then
     cat "$OUT_DIR/$p.out"
@@ -482,7 +692,7 @@ print_section() {
     fi
   fi
   echo
-  echo "panel-review: ${p} done (exit ${rc_val})" >&2
+  echo "panel-review: ${p} (${model_label}) done (exit ${rc_val})" >&2
 }
 
 # Track which panelists have already been printed. Bash 3.2 (macOS default) has
