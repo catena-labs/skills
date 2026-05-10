@@ -34,9 +34,13 @@ Before forming any findings, run these commands and read every byte of their out
    gh api repos/{{PR_REPO}}/issues/{{PR_NUMBER}}/comments --paginate
    ```
 
-If a _required_ command fails (gh is not authenticated, the PR cannot be loaded, the diff cannot be fetched), output exactly:
+If a _required_ command fails (gh is not authenticated, the PR cannot be loaded, the diff cannot be fetched), still emit the standard `Model:` and `Goal:` header lines (so the synthesizer can attribute the failure to a specific model), then output the failure marker:
 
 ```
+Model: <your model id>
+
+Goal (unclear): could not load PR {{PR_REF}} — review aborted before reading the diff.
+
 NO_FINDINGS — could not load PR {{PR_REF}}: <one-line reason from gh stderr>
 ```
 
