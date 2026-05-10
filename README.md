@@ -18,10 +18,11 @@ npx skills add catena-labs/skills --skill optimize-agents-md
 
 ## Skills
 
-| Skill                                             | Description                                                                                                            |
-| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| [optimize-agents-md](./skills/optimize-agents-md) | Optimize your AGENTS.md (and CLAUDE.md) files according to best practices. Works with monorepos, too                   |
-| [panel-review](./skills/panel-review)             | Fan a code review out to multiple local CLI agents (codex, claude, opencode) in parallel and synthesize their findings |
+| Skill                                                 | Description                                                                                                            |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| [optimize-agents-md](./skills/optimize-agents-md)     | Optimize your AGENTS.md (and CLAUDE.md) files according to best practices. Works with monorepos, too                   |
+| [panel-review](./skills/panel-review)                 | Fan a code review out to multiple local CLI agents (codex, claude, opencode) in parallel and synthesize their findings |
+| [post-review-comments](./skills/post-review-comments) | Triage review findings one at a time and batch the approved ones into a single inline-comment review on a GitHub PR    |
 
 ## License
 
