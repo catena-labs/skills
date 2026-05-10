@@ -361,7 +361,7 @@ criticals"), apply the scope; otherwise default to all findings.
 per-panelist sections and _before_ the `### Overview` heading, emit a single line so
 the user can verify deep mode actually ran without reading every entry:
 
-```
+```md
 **Deep mode:** ON — verified N findings across M panelists; dropped K as falsified, surfaced V.
 ```
 
@@ -374,7 +374,7 @@ present, the synthesis was standard mode regardless of trigger phrasing.
 **Output shape.** Each finding entry in **Consensus findings**, **Unique findings**,
 and **Disagreements** expands from two lines to four:
 
-```
+```md
 - [SEVERITY] [file:line](url) — one-sentence issue
   Verification: how I confirmed (e.g. "read auth/session.go:80–96 — the
     signature check at line 84 reads tok.claims before the cache load at line
