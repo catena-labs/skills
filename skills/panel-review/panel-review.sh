@@ -316,6 +316,13 @@ if (( CHECKOUT_MODE )); then
         gh pr view "$pr_ref" --json url,headRefOid,headRepository \
                   -q '.url, .headRefOid, .headRepository.nameWithOwner' 2>"$gh_err" || true
       )
+      # jq prints the literal string "null" (not empty) for missing object
+      # fields when used with -q, so an emptiness check alone misses the
+      # deleted-fork case. Reject "null" explicitly with a tailored message
+      # since the recovery (use --uncommitted) is fork-specific.
+      if [[ "$pr_head_nwo" == "null" ]]; then
+        die "--pr: PR #${pr_num} head repository has been deleted (likely a deleted fork); cannot create a worktree. Use --uncommitted to review local edits instead, or pass an explicit --commit <sha> if you have the head commit locally."
+      fi
       if [[ -z "$pr_url" || -z "$pr_head_sha" || -z "$pr_head_nwo" ]]; then
         msg="--pr --checkout: failed to resolve PR url/SHA/head-repo via gh pr view"
         [[ -s "$gh_err" ]] && msg+=$'\n  gh stderr: '"$(cat "$gh_err")"
