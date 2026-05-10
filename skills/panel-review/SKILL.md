@@ -195,15 +195,18 @@ When _not_ to use:
    - **MEDIUM** — touches business logic or non-trivial code paths. Findings exist
      but are fixable. No CRITICAL findings. Goal was clear or only mildly divergent
      across panelists.
-   - **HIGH** — any of: at least one CRITICAL finding (verified per step 9); the
+   - **HIGH** — any of: a verified HIGH finding raised by 2+ panelists; the
      change touches auth, session handling, payments, schema migrations, crypto, or
      production infra; panelists disagreed substantially on what the change does;
-     the diff is unusually large (>500 lines) AND lacks a clear goal.
+     the diff is unusually large (>500 lines) AND lacks a clear goal. CRITICAL
+     findings escalate one bucket up — see CRITICAL.
    - **CRITICAL** — verified bug in the change that would break production on merge,
-     OR a known data-loss / security-bypass / credential-leak path introduced.
+     OR a known data-loss / security-bypass / credential-leak path introduced. Any
+     verified CRITICAL finding (per step 9) escalates the whole change to this
+     bucket regardless of the area touched.
 
-   Example: `Risk: HIGH — touches session-token validation; codex flagged a CRITICAL
-timing-attack vulnerability at auth/session.go:88 (verified).`
+   Example: `Risk: CRITICAL — codex flagged a verified timing-attack
+vulnerability in session-token validation at auth/session.go:88.`
 
    ### Goal check
 
