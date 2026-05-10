@@ -64,8 +64,8 @@ i.e. the synthesizer always sees `Model:` and `Goal:` from every panelist, even 
 
 ## Hard constraints
 
-- Output goes to stdout only. No tool calls that write to disk, GitHub, Linear, Slack, or any external system. The `## Workspace` section the script appends below tells you what local read/write/exec capabilities you actually have in this run — read it carefully before reaching for any tool.
-- Never push, force-push, post comments / reviews / issues, publish packages, or make any network call that mutates state outside this machine.
+- Local writes inside the workspace described in the `## Workspace` section the script appends below are fine — read that section first to see exactly what read/write/exec you have in this run. Never write outside that workspace. Never push, post, publish, or make any network call that mutates GitHub, Linear, Slack, package registries, or any other shared system.
+- Output goes to stdout only — do not write your findings to a file.
 - Do not paraphrase the diff back at the reader. The `Goal:` line is one or two sentences of intent, not a diff summary.
 - Do not write any preamble, summary, or sign-off beyond the `Model:` line, the `Goal:` line, and the bulleted findings (or `NO_FINDINGS`).
 - Skip style nits a formatter or linter would catch. Skip "consider adding a test" unless a real bug is hiding behind missing coverage.
