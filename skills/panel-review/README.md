@@ -1,6 +1,6 @@
 # panel-review
 
-Fan a code review out to multiple local CLI coding agents (codex, claude, opencode) running in parallel, then synthesize their findings into one report. In deep mode, each agent gets its own isolated git worktree so they can run tests and chase downstream effects in parallel without stepping on each other.
+Fan a code review out to multiple local CLI coding agents (codex, claude, opencode) running in parallel, then synthesize their findings into one report. For PR / branch / commit targets, each agent gets its own isolated git worktree so they can run tests and chase downstream effects in parallel without stepping on each other.
 
 ## Install
 
@@ -19,6 +19,8 @@ Just ask Claude Code in plain English — the skill picks up the target and pane
 - "panel review this branch against main"
 - "panel review the auth changes, focus on session handling"
 - "panel review with just codex and claude"
+
+Add "deep" / "verify each finding" / "dig into the findings" to opt into deep mode: the coordinator independently confirms every finding against the code, drafts a concrete fix, and explains how the fix resolves the issue. Token-heavy — routine reviews should stick with the standard synthesis.
 
 ## What it does
 
