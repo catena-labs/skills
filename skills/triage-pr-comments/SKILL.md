@@ -74,12 +74,14 @@ Determine the PR author from the PR metadata (`headRefName` owner or the `author
 Use the GraphQL API to fetch review thread resolution status and reply history:
 
 ```bash
-gh api graphql -f query='
-  query($owner: String!, $repo: String!, $pr: Int!) {
+gh api graphql --paginate -f query='
+  query($owner: String!, $repo: String!, $pr: Int!, $endCursor: String) {
     repository(owner: $owner, name: $repo) {
       pullRequest(number: $pr) {
-        reviewThreads(first: 100) {
+        reviewThreads(first: 100, after: $endCursor) {
+          pageInfo { hasNextPage endCursor }
           nodes {
+            id
             isResolved
             isOutdated
             comments(first: 100) {
@@ -95,6 +97,8 @@ gh api graphql -f query='
   }
 ' -f owner='{owner}' -f repo='{repo}' -F pr='{number}'
 ```
+
+`gh api graphql --paginate` follows the `pageInfo`/`endCursor` cursor automatically as long as the query exposes them and accepts an `$endCursor` variable, so this covers PRs with more than 100 threads. The nested `comments(first: 100)` is left un-paginated because GitHub's `gh` GraphQL pagination only follows one connection at a time — if a single thread ever exceeds 100 comments (rare), fall back to a per-thread fetch using the thread `id`. Capture each thread's `id` here; Step 5 needs it to resolve the thread.
 
 Drop any inline comment whose review thread meets **any** of these conditions:
 
@@ -294,4 +298,25 @@ After all fixes are implemented and verified (tests pass, linter clean):
    - For **Fix** verdicts: briefly describe the fix applied.
    - For **Dismiss** verdicts: explain concisely why the concern does not apply (e.g., "no existing rows", "subsumed by the runtime guard", "naming convention is self-documenting").
    - For bot nitpick comments that were filtered out in Step 1: ignore them entirely. Do not reply or acknowledge.
-3. **Resolve all inline-comment threads** using the GraphQL `resolveReviewThread` mutation. Root-level comments and review-level summaries have no thread to resolve — leave them as-is once replied to.
+3. **Resolve all inline-comment threads** using the GraphQL `resolveReviewThread` mutation. Pass the thread `id` captured in Step 1 (not the comment `databaseId`):
+
+   ```bash
+   gh api graphql -f query='
+     mutation($threadId: ID!) {
+       resolveReviewThread(input: { threadId: $threadId }) {
+         thread { isResolved }
+       }
+     }
+   ' -f threadId='{thread_id}'
+   ```
+
+   Root-level comments and review-level summaries have no thread to resolve — leave them as-is once replied to.
+
+### Error handling
+
+The commit/push/reply/resolve sequence has a strict ordering — partial failures should not leave the PR in a half-applied state.
+
+- **Push fails (protected branch, stale base, rejected hook):** stop immediately. Do not post any replies and do not resolve any threads. Report the push error to the user so they can fix the branch state and re-run Step 5.
+- **A single reply fails (rate limit, transient network error, invalid comment id):** log the failure, continue with the remaining replies, and surface every failure at the end so the user can retry or post them manually.
+- **A `resolveReviewThread` mutation fails:** log and continue. Thread resolution is best-effort — the reply itself is what matters for the reviewer.
+- **At the end:** print a summary listing which comments got replies, which threads got resolved, and which operations failed. Never claim success while errors are outstanding.
