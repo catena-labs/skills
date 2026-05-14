@@ -22,6 +22,7 @@ Just ask Claude Code in plain English — defaults to the current branch's PR wh
 ## What it does
 
 - **Auto-detects the target PR** from the current branch via `gh pr view`. Also accepts a full URL, `owner/repo#N`, or a bare PR number.
+- **Covers every comment surface on the PR.** Inline code comments, review-level summary text, and root-level (issue-style) comments on the PR conversation tab all get pulled in and triaged together.
 - **Filters out noise before any analysis.** Drops the PR author's own comments, threads marked resolved or outdated, threads the author has already replied to, and bot comments that are purely stylistic (docstring nags, naming suggestions, "consider moving X"). Keeps every human comment regardless of category, and keeps bot comments that flag correctness / security / production impact.
 - **Fans out to parallel analysis agents.** Each agent reads the comment, the code at the comment location, surrounding context, and any cross-file callers — then weighs ramifications both ways and produces a verdict with a confidence level. Each agent is required to challenge its own recommendation before committing to it.
 - **Presents one ranked report** with a per-comment breakdown (understanding, code context, if-fixed / if-not-fixed, verdict + reasoning) and a summary table.

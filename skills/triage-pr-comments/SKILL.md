@@ -8,10 +8,12 @@ description: >
   "deal with the reviewers' feedback", "decide which comments to fix",
   "address review comments on PR N", or any similar phrasing about working
   through a pull request's review feedback. Defaults to the current branch's
-  PR when no argument is given. Filters out the PR author's own comments,
-  resolved/outdated threads, threads the author already replied to, and
-  bot stylistic noise. Spawns parallel agents for first-pass analysis and
-  then re-investigates each Fix verdict from scratch during the walkthrough.
+  PR when no argument is given. Covers inline code comments, review-level
+  summaries, and root-level (issue) comments on the PR conversation. Filters
+  out the PR author's own comments, resolved/outdated threads, threads the
+  author already replied to, and bot stylistic noise. Spawns parallel agents
+  for first-pass analysis and then re-investigates each Fix verdict from
+  scratch during the walkthrough.
 argument-hint: "[pr-url or owner/repo#number] (defaults to current branch's PR)"
 ---
 
@@ -39,7 +41,7 @@ Fetch the full diff:
 gh pr diff {number} -R {repo}
 ```
 
-Fetch ALL review comments (inline comments on code, not top-level PR comments):
+Fetch ALL review comments (inline comments on code):
 
 ```bash
 gh api repos/{owner}/{repo}/pulls/{number}/comments --paginate
@@ -53,7 +55,15 @@ gh api repos/{owner}/{repo}/pulls/{number}/reviews --paginate
 
 Filter to reviews where `body` is non-empty and `state` is not `DISMISSED`.
 
-Combine inline comments and review-level comments into a single list. Group inline comments by the review they belong to (via `pull_request_review_id`) so you can see which review body accompanies which set of inline comments.
+Also fetch root-level PR comments (standalone comments on the PR conversation, not attached to a review or inline on code — under the hood these are issue comments since PRs are issues):
+
+```bash
+gh api repos/{owner}/{repo}/issues/{number}/comments --paginate
+```
+
+These have no `path` or `line` — they're general comments on the PR. Treat them like review-level comments for downstream analysis (no file/line context, just a body).
+
+Combine inline comments, review-level comments, and root-level comments into a single list. Group inline comments by the review they belong to (via `pull_request_review_id`) so you can see which review body accompanies which set of inline comments. Root-level comments stand on their own.
 
 ### Filter out the PR author's own comments
 
@@ -92,6 +102,8 @@ Drop any inline comment whose review thread meets **any** of these conditions:
 2. **Outdated** (`isOutdated: true`) — left on code that has since been updated, meaning the author likely already addressed them.
 3. **Already replied to by the PR author** — if the thread's comments list includes a reply from the PR author after the reviewer's comment, the author has already engaged with the feedback. Drop these threads regardless of resolution status.
 
+Root-level (issue) comments don't have review threads and can't be "resolved" via GitHub's UI, so this filter doesn't apply to them. Instead, drop a root-level comment if a later root-level comment from the PR author appears to reply to it (e.g., quotes it, addresses it directly, or follows it chronologically and is clearly a response). When in doubt, keep the root-level comment — it's better to surface a stale one than to silently drop unaddressed feedback.
+
 ### Filter out bot noise
 
 Identify bot reviewers by checking `user.type == "Bot"` or login suffixes like `[bot]` (e.g., `coderabbitai[bot]`, `github-actions[bot]`).
@@ -104,7 +116,7 @@ If zero comments remain after filtering, tell the user and stop.
 
 ## Step 2: Spawn Analysis Agents
 
-For efficiency, spawn parallel Agent subagents to analyze comments. Group comments by file (inline comments) plus one group for review-level comments.
+For efficiency, spawn parallel Agent subagents to analyze comments. Group comments by file (inline comments), plus one group for review-level comments, plus one group for root-level (issue) comments.
 
 Assign each comment a stable sequential number (starting at 1) **before** distributing to agents. This numbering persists through the entire workflow — analysis, presentation, summary table, and interactive resolution all use the same numbers.
 
@@ -125,7 +137,8 @@ For each comment, the agent must perform the following analysis:
 
 ### 2b. Understand the Code
 
-- Read the code at the comment location using `git show {headRefOid}:{file_path}`
+- For inline comments: read the code at the comment location using `git show {headRefOid}:{file_path}`
+- For review-level and root-level comments with no file/line: identify which files or behaviors the comment is talking about from the diff and PR description, then read those
 - Read surrounding context (the full function/method/class, not just the commented line)
 - If the comment references behavior in other files, trace call chains and read those files too
 - Understand what the code does, why it was written this way, and what alternatives exist
@@ -168,8 +181,10 @@ Revise the recommendation if the challenge reveals a flaw. State the final verdi
 
 For each comment, return:
 
+For inline comments use `{file_path}:{line}` as the location. For review-level comments use `review summary`. For root-level comments use `PR conversation (root-level)`.
+
 ```
-## #{number}: Comment by {author} on {file_path}:{line}
+## #{number}: Comment by {author} on {location}
 
 **Comment:** {comment text, truncated to first 200 chars if longer}
 
@@ -272,8 +287,11 @@ If **"done"**: end the skill.
 After all fixes are implemented and verified (tests pass, linter clean):
 
 1. **Commit and push first.** Create a commit with all fix changes, then push to the remote branch before posting any PR comments. The reviewer must be able to see the fixes on GitHub before they receive replies.
-2. **Then reply to each comment thread.** Use the GitHub API to post inline replies to each review comment thread (`repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies`):
+2. **Then reply to each comment.** The reply mechanism depends on the comment type:
+   - **Inline review comments:** post an inline reply via `repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies`.
+   - **Review-level comments:** the review summary itself isn't a thread, so address it inside the relevant inline-comment replies if it's been broken out into individual line comments, or post a single root-level reply on the PR (`repos/{owner}/{repo}/issues/{number}/comments`) that addresses the summary as a whole.
+   - **Root-level (issue) comments:** post a new root-level comment via `repos/{owner}/{repo}/issues/{number}/comments` that quotes or `@`-mentions the original commenter and addresses their point. GitHub doesn't support nested replies on root-level PR comments.
    - For **Fix** verdicts: briefly describe the fix applied.
    - For **Dismiss** verdicts: explain concisely why the concern does not apply (e.g., "no existing rows", "subsumed by the runtime guard", "naming convention is self-documenting").
    - For bot nitpick comments that were filtered out in Step 1: ignore them entirely. Do not reply or acknowledge.
-3. **Resolve all threads** using the GraphQL `resolveReviewThread` mutation.
+3. **Resolve all inline-comment threads** using the GraphQL `resolveReviewThread` mutation. Root-level comments and review-level summaries have no thread to resolve — leave them as-is once replied to.
