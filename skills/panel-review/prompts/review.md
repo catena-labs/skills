@@ -66,7 +66,14 @@ For every finding, use this exact shape so the panel coordinator can merge resul
 
 **Every finding MUST include a file path with a line number AND a `Fix:` line.** No exceptions. The panel coordinator surfaces these directly to the user as the primary deliverable; findings without `file:line` or without a `Fix:` line will be dropped during synthesis. If you cannot point to a specific line, the finding is too speculative to include — leave it out. Use ranges (`file.ext:42-58`) when the issue spans multiple lines.
 
-Severities: `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`. Use `LOW` sparingly.
+**Severity anchors.** Pick the bucket by blast radius, not by how confident you are:
+
+- `CRITICAL` — the change ships broken: would break production on merge, lose data, bypass auth, or leak credentials. A reviewer would block merge on sight.
+- `HIGH` — a real bug a competent reviewer would ask the author to fix before merging: race conditions with a realistic trigger, broken error paths in load-bearing code, security flaws in auth / payments / crypto / migrations, regressions to existing behavior.
+- `MEDIUM` — a real bug with bounded blast radius: incorrect behavior in a non-critical path, missed edge cases the user can recover from, performance regressions with a concrete trigger, maintainability issues that will bite a near-future change.
+- `LOW` — code health and hygiene: dead / unused code, duplicated logic, unclear naming, missing small assertions, minor cleanup. Worth surfacing; not worth blocking merge over. Newly-added but currently-unused UI / utilities / types belong here, not in HIGH.
+
+Calibrate by impact, not novelty: a brand-new file with dead code is still LOW. Do not push items up the scale to make the finding feel weightier.
 
 If multiple findings share a file, list them as separate bullets.
 
