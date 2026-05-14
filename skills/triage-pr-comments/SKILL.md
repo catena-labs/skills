@@ -67,7 +67,7 @@ Combine inline comments, review-level comments, and root-level comments into a s
 
 ### Filter out the PR author's own comments
 
-Determine the PR author by reading `author.login` from `gh pr view --json author -q .author.login`. Drop all comments where `user.login` matches that login. The author's own comments (dev notes, self-annotations, design rationale) are not review feedback and should never appear in the findings.
+Determine the PR author by reading `author.login` from `gh pr view {number} -R {repo} --json author -q .author.login`. Drop all comments where `user.login` matches that login. The author's own comments (dev notes, self-annotations, design rationale) are not review feedback and should never appear in the findings.
 
 ### Filter out resolved, outdated, and already-replied comments
 
@@ -87,6 +87,7 @@ gh api graphql --paginate -f query='
             comments(first: 100) {
               nodes {
                 databaseId
+                createdAt
                 author { login }
               }
             }
@@ -104,7 +105,7 @@ Drop any inline comment whose review thread meets **any** of these conditions:
 
 1. **Resolved** (`isResolved: true`) — already addressed and marked resolved.
 2. **Outdated** (`isOutdated: true`) — left on code that has since been updated, meaning the author likely already addressed them.
-3. **Already replied to by the PR author** — if the thread's comments list includes a reply from the PR author after the reviewer's comment, the author has already engaged with the feedback. Drop these threads regardless of resolution status.
+3. **Already replied to by the PR author** — drop the thread if it contains a PR-author comment whose `createdAt` is later than the `createdAt` of the most recent reviewer comment in the same thread. Compare timestamps explicitly rather than relying on node order, and anchor the comparison to the most recent reviewer comment so a reviewer follow-up that arrived after the author's reply still surfaces for triage.
 
 Root-level (issue) comments don't have review threads and can't be "resolved" via GitHub's UI, so this filter doesn't apply to them. Instead, drop a root-level comment if a later root-level comment from the PR author appears to reply to it (e.g., quotes it, addresses it directly, or follows it chronologically and is clearly a response). When in doubt, keep the root-level comment — it's better to surface a stale one than to silently drop unaddressed feedback.
 
