@@ -346,8 +346,8 @@ if (( CHECKOUT_MODE )); then
       # "failed to resolve" line.
       gh_err="$OUT_DIR/gh-pr-view.err"
       { read -r pr_url; read -r pr_head_sha; read -r pr_head_nwo; } < <(
-        gh pr view "$pr_ref" --json url,headRefOid,headRepository \
-                  -q '.url, .headRefOid, .headRepository.nameWithOwner' 2>"$gh_err" || true
+        gh pr view "$pr_ref" --json url,headRefOid,headRepository,headRepositoryOwner \
+                  -q '.url, .headRefOid, (if (.headRepository.nameWithOwner // "") != "" then .headRepository.nameWithOwner elif .headRepositoryOwner and .headRepository.name then "\(.headRepositoryOwner.login)/\(.headRepository.name)" else "null" end)' 2>"$gh_err" || true
       )
       # jq prints the literal string "null" (not empty) for missing object
       # fields when used with -q, so an emptiness check alone misses the

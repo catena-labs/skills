@@ -133,8 +133,11 @@ When _not_ to use:
 
    **If the user asked for a deep review** (see the **Deep mode** section after
    step 10), dispatch the per-finding verification subagents and wait for their
-   results _before_ emitting the synthesis below; every finding entry expands
-   from the standard 2-3 lines to five. The section structure stays the same.
+   results _before_ emitting the synthesis below. The section structure and
+   per-finding skeleton (`[SEVERITY] file:line — issue.` / `Fix: …` /
+   `Flagged by: …`) stay identical to standard mode; deep mode inserts two
+   extra lines (`Why:` and `Verified by:`) between `Fix:` and `Flagged by:`
+   so a reader's eye lands on the same anchor lines in both modes.
 
    **Always carry the panelist's self-reported model into the summary.** Each
    panelist starts its output with a `Model: <id>` line; the script also exposes
@@ -533,11 +536,15 @@ only the criticals"), apply the scope; otherwise default to all findings _and_ a
    Status: VERIFIED | FALSIFIED | CORRECTED | INCONCLUSIVE
    Evidence: concrete files/lines read and what they show.
    Corrected finding: only when Status is CORRECTED.
-   Proposed fix: concrete change anchored at file:line, with a short snippet for
+   Fix: concrete change anchored at file:line, with a short snippet for
      non-trivial fixes.
-   Why this fixes it: one or two sentences naming the mechanism.
+   Why: one or two sentences naming the mechanism.
    Confidence: high | medium | low
    ```
+
+   The verifier's `Evidence`, `Fix`, and `Why` fields feed the synthesis's
+   `Verified by:`, `Fix:`, and `Why:` lines respectively — same labels, no
+   remapping.
 
 3. **Reconcile verifier results.** Treat `VERIFIED` and `CORRECTED` as eligible for
    the synthesis. Use the corrected version when the verifier found a better line,
@@ -566,36 +573,42 @@ finding because the user scoped the request, say so:
 This declaration is the single source of truth for "did deep mode run" — if it isn't
 present, the synthesis was standard mode regardless of trigger phrasing.
 
-**Output shape.** Each finding entry in `### must-fix`, `### should-fix`,
-`### polish`, and `### Disagreements` expands from the standard 2-3 lines to
-five lines:
+**Output shape.** Each finding entry in `### must-fix`, `### should-fix`, and
+`### Disagreements` uses the same `[SEVERITY] / Fix / Flagged by` skeleton as
+standard mode, with two extra detail lines (`Why:` and `Verified by:`)
+inserted between `Fix:` and `Flagged by:`. Same anchor lines, same labels —
+deep mode just interleaves evidence:
 
 ```md
 - [SEVERITY] [file:line](url) — one-sentence issue.
-  Verification: verifier evidence (e.g. "read auth/session.go:80–96 — the
-  signature check at line 84 reads tok.claims before the cache load at line
-  88 acquires the mutex; a second goroutine can swap claims in the window").
-  Cite files/lines; do not assert without evidence.
-  Proposed fix: concrete change, with a code snippet for non-trivial cases,
-  anchored at file:line.
-  Why this fixes it: one or two sentences on the mechanism (e.g. "serializing
-  check + load behind the same mutex closes the TOCTOU window — no goroutine
-  can mutate claims between validation and use").
+  Fix: concrete change, with a code snippet for non-trivial cases, anchored
+  at file:line.
+  Why: one or two sentences on the mechanism (e.g. "serializing check + load
+  behind the same mutex closes the TOCTOU window — no goroutine can mutate
+  claims between validation and use").
+  Verified by: subagent read auth/session.go:80–96 — the signature check at
+  line 84 reads tok.claims before the cache load at line 88 acquires the
+  mutex; a second goroutine can swap claims in the window. Cite files/lines;
+  do not assert without evidence.
   Flagged by 2: codex (gpt-5.5), claude (claude-opus-4.7)
 ```
 
-LOW findings in `### polish` still expand under deep mode — the one-line
-collapse only applies in standard mode.
+LOW findings in `### polish` stay collapsed to one line in deep mode too —
+verifying every LOW is high cost for low decision-value, and the single-line
+shape keeps `### polish` skimmable in both modes. The exception is items the
+verifier promoted out of LOW (`Status: CORRECTED` with a severity bump): those
+findings have already moved into `### should-fix` or `### must-fix` and use
+the full deep-mode shape there.
 
 A substantiated `Approach (questionable):` entry in `### must-fix` follows the
-same five-line shape under deep mode, but the leading `file:line` is replaced
-with the root-cause location as in standard mode:
+same skeleton under deep mode, but the leading `file:line` is replaced with
+the root-cause location as in standard mode:
 
 ```md
 - [HIGH] root cause: <named location> — <one-sentence summary of the wrong-layer fix>.
-  Verification: <how you confirmed the root cause exists and the current change is symptomatic>.
-  Proposed fix: <concrete cross-layer change — often a migration / schema / API contract change, not a line edit>, anchored at the root-cause location.
-  Why this fixes it: <one or two sentences on the mechanism — what invariant the cross-layer fix restores>.
+  Fix: <concrete cross-layer change — often a migration / schema / API contract change, not a line edit>, anchored at the root-cause location.
+  Why: <one or two sentences on the mechanism — what invariant the cross-layer fix restores>.
+  Verified by: <how the verifier confirmed the root cause exists and the current change is symptomatic>.
   Flagged by: codex (gpt-5.5)
 ```
 
