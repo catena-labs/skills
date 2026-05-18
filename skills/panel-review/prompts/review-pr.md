@@ -34,12 +34,14 @@ Before forming any findings, run these commands and read every byte of their out
    gh api repos/{{PR_REPO}}/issues/{{PR_NUMBER}}/comments --paginate
    ```
 
-If a _required_ command fails (gh is not authenticated, the PR cannot be loaded, the diff cannot be fetched), still emit the standard `Model:` and `Goal:` header lines (so the synthesizer can attribute the failure to a specific model), then output the failure marker:
+If a _required_ command fails (gh is not authenticated, the PR cannot be loaded, the diff cannot be fetched), still emit the full `Model:`, `Goal:`, and `Approach:` header lines (so the synthesizer can attribute the failure to a specific model without violating the output contract), then output the failure marker:
 
 ```
 Model: <your model id>
 
 Goal (unclear): could not load PR {{PR_REF}} — review aborted before reading the diff.
+
+Approach (sound): no diff to evaluate; cannot assess approach.
 
 NO_FINDINGS — could not load PR {{PR_REF}}: <one-line reason from gh stderr>
 ```
@@ -64,7 +66,7 @@ If only the _optional_ commands fail (comment fetches typically — network blip
 
 ## How to report
 
-Your output has three parts in this order: a **Model** line, a **Goal** line, and the **findings** list.
+Your output has four parts in this order: a **Model** line, a **Goal** line, an **Approach** line, and the **findings** list.
 
 ### 0. Model (mandatory, single line, FIRST line of your output)
 
@@ -94,7 +96,23 @@ Goal (clear, matches description): refactor the auth middleware to extract sessi
 Goal (unclear): the diff renames `parseRequest` to `parseInput` (mechanical rename) AND changes its return shape from a tuple to an object; these look like two unrelated changes bundled together.
 ```
 
-### 2. Findings
+### 2. Approach (mandatory, one block, immediately after the Goal line)
+
+Beyond "is this change correct," ask: **is it being made at the right layer?** A UI workaround for a server bug, a client-side validator for a missing DB constraint, a retry loop around an idempotency violation, a per-call cache patching a connection-pool leak — these work locally but leave the real cause in place, and every future caller pays the same tax.
+
+Use one of these exact prefixes:
+
+- `Approach (sound):` — the change targets the right layer. This is the default; do not over-think it.
+- `Approach (questionable):` — you have concrete evidence the fix is symptomatic, not causal. Use this **only** when you can name all three of:
+  1. **What the actual root cause appears to be** (e.g., "the API returns inconsistent shapes across endpoints", "the `orders` table allows duplicate `(user_id, idempotency_key)` rows").
+  2. **Where the root-cause fix would live** — a `file:line`, a named module, or "needs a migration on table `X`". Be specific enough that the author could navigate there.
+  3. **Why the current change is symptomatic** (e.g., "this is the third caller to re-implement the same validation — grep shows two prior copies"; "the diff itself adds a TODO acknowledging the workaround"; "the same bug recurs in `other-file.ts:88` and this change doesn't touch it").
+
+If you cannot name all three, stay on `Approach (sound):`. Speculative alternatives ("could use Redux", "could rewrite in Rust", "have you considered a different framework") are exactly the noise this block is designed to reject. The coordinator treats a substantiated `Approach (questionable):` as a HIGH-severity item — the evidence bar matches that severity.
+
+**Worktree mode calibration** (see `## Workspace` below): you are running in a throwaway checkout with grep, test, and shell access. The bar for `Approach (questionable):` is higher here, not lower — if you flag it, you should have actually grepped for sibling implementations, read the schema, or run the test that demonstrates the symptom recurs elsewhere. Cite the command or file in the evidence (e.g., "rg `validateOrderShape` returns 3 hits in `src/handlers/`").
+
+### 3. Findings
 
 For every finding, use this exact shape so the panel coordinator can merge results:
 
@@ -107,17 +125,24 @@ For every finding, use this exact shape so the panel coordinator can merge resul
 
 Use the line numbers as they appear in the PR's _new_ file state (i.e., right-side line numbers in the GitHub diff view, which match `gh pr diff` post-image hunks). Use ranges (`file.ext:42-58`) when the issue spans multiple lines.
 
-Severities: `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`. Use `LOW` sparingly.
+**Severity anchors.** Pick the bucket by blast radius, not by how confident you are:
+
+- `CRITICAL` — the change ships broken: would break production on merge, lose data, bypass auth, or leak credentials. A reviewer would block merge on sight.
+- `HIGH` — a real bug a competent reviewer would ask the author to fix before merging: race conditions with a realistic trigger, broken error paths in load-bearing code, security flaws in auth / payments / crypto / migrations, regressions to existing behavior.
+- `MEDIUM` — a real bug with bounded blast radius: incorrect behavior in a non-critical path, missed edge cases the user can recover from, performance regressions with a concrete trigger, maintainability issues that will bite a near-future change.
+- `LOW` — code health and hygiene: dead / unused code, duplicated logic, unclear naming, missing small assertions, minor cleanup. Worth surfacing; not worth blocking merge over. Newly-added but currently-unused UI / utilities / types belong here, not in HIGH.
+
+Calibrate by impact, not novelty: a brand-new file with dead code is still LOW. Do not push items up the scale to make the finding feel weightier.
 
 If multiple findings share a file, list them as separate bullets.
 
-If you find nothing meaningful, still output the `Model:` and `Goal:` lines first, then on the next line output:
+If you find nothing meaningful, still output the `Model:`, `Goal:`, and `Approach:` lines first, then on the next line output:
 
 ```
 NO_FINDINGS — <one sentence on what you checked, including which gh commands you ran>
 ```
 
-i.e. the synthesizer always sees `Model:` and `Goal:` from every panelist, even when there are zero findings.
+i.e. the synthesizer always sees `Model:`, `Goal:`, and `Approach:` from every panelist, even when there are zero findings.
 
 ## Hard constraints
 
@@ -125,7 +150,7 @@ i.e. the synthesizer always sees `Model:` and `Goal:` from every panelist, even 
 - **No external network mutations.** Do not push to git remotes, post to Slack/Linear/Discord, publish packages, or make any network call that mutates state outside this machine.
 - You are running inside a dedicated, throwaway git worktree pinned to this PR's head SHA — see the `## Workspace` section below. Local edits in that worktree are fine; the worktree is destroyed when the run ends.
 - Do not paraphrase the diff back at the reader. The `Goal:` line is one or two sentences of intent, not a diff summary.
-- Do not write any preamble, summary, or sign-off beyond the `Model:` line, the `Goal:` line, and the bulleted findings (or `NO_FINDINGS`).
+- Do not write any preamble, summary, or sign-off beyond the `Model:` line, the `Goal:` line, the `Approach:` line, and the bulleted findings (or `NO_FINDINGS`).
 - Skip style nits a formatter or linter would catch. Skip "consider adding a test" unless a real bug is hiding behind missing coverage.
 
 ## Calibration

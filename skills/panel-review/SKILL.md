@@ -134,16 +134,16 @@ When _not_ to use:
    **If the user asked for a deep review** (see the **Deep mode** section after
    step 10), dispatch the per-finding verification subagents and wait for their
    results _before_ emitting the synthesis below; every finding entry expands
-   from two lines to four. The section structure (Overview, Risk, Goal check,
-   Consensus, Unique, Disagreements, Action list) stays the same.
+   from the standard 2-3 lines to five. The section structure stays the same.
 
    **Always carry the panelist's self-reported model into the summary.** Each
    panelist starts its output with a `Model: <id>` line; the script also exposes
    it in the `## <name> / <model> (exit N)` per-panelist section heading. Use
    the model name everywhere you would otherwise just say the panelist's name
-   (e.g. `Raised by: codex (gpt-5.5)`, `### claude (claude-opus-4.7)`). If a
-   panelist reported `Model: unknown`, surface that as `(unknown)` rather than
-   silently omitting the model.
+   (e.g. `Flagged by: codex (gpt-5.5)`, or in a misinterpretation callout
+   like `codex (gpt-5.5) appears to have misinterpreted the change`). If a
+   panelist reported `Model: unknown`, surface that as `(unknown)` rather
+   than silently omitting the model.
 
    **Tappable links to PR file:line.** When the target is a PR (the script's
    combined-output header shows `Target: PR #N` and emits `- PR URL: <url>`),
@@ -155,12 +155,13 @@ When _not_ to use:
    bash skills/panel-review/pr-line-url.sh "$pr_url" "<file>" "<line-or-range>"
    ```
 
-   Apply this in **Consensus findings**, **Unique findings**, **Disagreements**,
-   and the **Action list** — every place a `file:line` appears in the synthesis.
-   Leave per-panelist sections (the raw `## <name> / <model>` blocks) untouched
-   so the panelist's verbatim output is preserved. For non-PR targets, skip the
-   wrapping — leave bare `file:line` text since users can typically `cmd-click`
-   in their terminal to open it locally.
+   Apply this everywhere `file:line` appears in the synthesis — every finding
+   bullet under **must-fix**, **should-fix**, **polish**, plus any callout or
+   **Disagreements** entry. Leave per-panelist sections (the raw
+   `## <name> / <model>` blocks) untouched so the panelist's verbatim output
+   is preserved.
+   For non-PR targets, skip the wrapping — leave bare `file:line` text since
+   users can typically `cmd-click` in their terminal to open it locally.
 
    Example transformation. Panelist output:
 
@@ -169,123 +170,287 @@ When _not_ to use:
      Fix: take the cache lock before validating the signature.
    ```
 
-   Synthesized consensus entry:
+   Synthesized entry:
 
    ```
    - [HIGH] [auth/session.go:88](https://github.com/owner/repo/pull/27/files#diff-...R88) — TOCTOU between token check and claim load.
      Fix: take the cache lock before validating the signature.
-     Raised by: codex (gpt-5.5), claude (claude-opus-4.7)
+     Flagged by 2: codex (gpt-5.5), claude (claude-opus-4.7)
    ```
 
-   **Every finding in every section below MUST include `file:line` and a `Fix:` line.**
-   Drop any panelist finding that lacks a concrete location or a suggested fix — those
-   are too speculative to surface. If the issue itself is real, infer the location
-   from the diff/PR yourself; if you cannot, leave it out.
+   **Every finding MUST include `file:line` (or a named root-cause location for
+   substantiated `Approach (questionable):` items) AND a `Fix:` line.** Drop any
+   panelist finding that lacks a concrete location or a suggested fix — those
+   are too speculative to surface. If the issue itself is real, infer the
+   location from the diff/PR yourself; if you cannot, leave it out.
 
-   Emit the synthesis using these section headings, in this exact order:
+   **Section structure.** The synthesis renders sections in this fixed order,
+   but most sections are conditional — emit a heading only when it has content.
+   The conditional behavior matters: blank sections, "none" placeholders, and
+   ceremonial labels make the report feel robotic and bury the real signal.
+   - `### Overview` — always.
+   - `### Risk` — always.
+   - **Misinterpretation callout** — only when a panelist's stated goal disagrees
+     with the actual diff. Renders as a `**Misinterpretation detected:** …`
+     block between `### Risk` and the next section. No callout when nothing's
+     wrong.
+   - `### Goal check` — only when goals are contested (mixed clear/unclear,
+     panelists describe different goals, or any panelist tagged
+     `(clear, contradicts description)`). When all agree, omit the section
+     entirely; the Overview lead already states the goal.
+   - `### Approach check` — only when at least one panelist flagged
+     `Approach (questionable):` with all three evidence components present and
+     you verified them. When all-sound (or all under-evidenced), omit the
+     section; `Approach: sound.` appears inline at the end of `### Risk`.
+   - `### must-fix` — CRITICAL/HIGH findings. Omit if empty.
+   - `### should-fix` — MEDIUM findings. Omit if empty.
+   - `### polish` — LOW findings. Omit if empty.
+   - `### Disagreements` — only when panelists actually contradict each other
+     on a finding (one flags it, another examined the same code and said it's
+     fine; or verification falsified a raised finding). Omit when there's
+     nothing to surface — do NOT emit a "Disagreements: none." line.
 
    ### Overview
 
-   Two to four sentences for a human who has not seen the diff. State factually what
-   files / areas changed, the kind of change (refactor, bug fix, new feature, config,
-   dep bump, infra, …), and rough scope (lines added/removed, files touched). For PR
-   mode pull this from `gh pr view --json files` and the diff; for non-PR targets
-   infer from the diff. Do **not** editorialize — evaluation lives in Risk and
-   Findings.
+   Two short paragraphs.
+
+   **Paragraph 1: lead with the goal (uncontested case only).** When all
+   panelists agreed on a clear goal (no goal-check section will be emitted),
+   open with the goal in plain human language — one sentence, no `Goal:`
+   label, no "all panelists agree" suffix. The absence of a goal-check
+   section below is the implicit signal that everyone agreed. Example:
+
+   ```
+   Stand up the @bank/evm package as the foundation for future send-saga work — viem-backed primitives for the EVM transaction lifecycle.
+   ```
+
+   If the goal is contested (any case that would trigger a goal-check
+   section per the conditional rules above), **skip paragraph 1 entirely**.
+   The reader's signal that the goal is contested is the presence of the
+   goal-check section further down; absence of a lead in Overview lines up
+   with that.
+
+   **Paragraph 2: factual scope.** Two to four sentences for a human who has
+   not seen the diff. State factually what files / areas changed, the kind of
+   change (refactor, bug fix, new feature, config, dep bump, infra, …), and
+   rough scope (lines added/removed, files touched). For PR mode pull this
+   from `gh pr view --json files` and the diff; for non-PR targets infer from
+   the diff. Do **not** editorialize — evaluation lives in `### Risk` and the
+   finding buckets.
 
    ### Risk
 
-   One of `LOW` / `MEDIUM` / `HIGH` / `CRITICAL`, then a one-sentence justification
-   that points at observable signals (consensus findings, area touched, scope), not
-   vibes. Rubric:
-   - **LOW** — docs / tests / formatting / non-load-bearing refactor. No consensus
-     findings. No HIGH/CRITICAL unique findings. All panelists agreed on the goal.
-     No auth / payments / migrations / cryptography touched.
-   - **MEDIUM** — touches business logic or non-trivial code paths. Findings exist
-     but are fixable. No CRITICAL findings. Goal was clear or only mildly divergent
-     across panelists.
-   - **HIGH** — any of: a verified HIGH finding raised by 2+ panelists; the
-     change touches auth, session handling, payments, schema migrations, crypto, or
-     production infra; panelists disagreed substantially on what the change does;
-     the diff is unusually large (>500 lines) AND lacks a clear goal. CRITICAL
-     findings escalate one bucket up — see CRITICAL.
-   - **CRITICAL** — verified bug in the change that would break production on merge,
-     OR a known data-loss / security-bypass / credential-leak path introduced. Any
-     verified CRITICAL finding (per step 9) escalates the whole change to this
-     bucket regardless of the area touched.
+   One of `LOW` / `MEDIUM` / `HIGH` / `CRITICAL`, then a one-sentence
+   justification that points at observable signals (multi-panelist findings,
+   area touched, scope), not vibes. When every panelist tagged
+   `Approach (sound):` and there are no questionable claims to surface,
+   append `Approach: sound.` as a second sentence so the verdict stays
+   visible without a separate section. When a `### Approach check` section
+   will be emitted below, omit the inline `Approach:` line — the section
+   carries the detail.
 
-   Example: `Risk: CRITICAL — codex flagged a verified timing-attack
-vulnerability in session-token validation at auth/session.go:88.`
+   Rubric:
+   - **LOW** — docs / tests / formatting / non-load-bearing refactor. No
+     multi-panelist findings. No HIGH/CRITICAL findings. All panelists agreed
+     on the goal. All panelists tagged `Approach (sound):`. No auth /
+     payments / migrations / cryptography touched.
+   - **MEDIUM** — touches business logic or non-trivial code paths. Findings
+     exist but are fixable. No CRITICAL findings. Goal was clear or only
+     mildly divergent across panelists. No verified `Approach (questionable):`.
+   - **HIGH** — any of:
+     - a verified HIGH finding raised by 2+ panelists;
+     - a verified `Approach (questionable):` flag (the change is fixing the
+       wrong layer — even a correct implementation is short-term relief at
+       the cost of future bugs);
+     - the change touches auth, session handling, payments, schema
+       migrations, crypto, or production infra;
+     - panelists disagreed substantially on what the change does;
+     - the diff is unusually large (>500 lines) AND lacks a clear goal.
+   - **CRITICAL** — any verified CRITICAL finding (a bug in the change that
+     would break production on merge, or a known data-loss / security-bypass
+     / credential-leak path introduced) escalates the whole change to this
+     bucket regardless of the area touched. A verified `Approach (questionable):`
+     that ALSO independently satisfies another HIGH trigger (e.g. wrong-layer
+     fix in auth/payments code) lands here too.
 
-   ### Goal check
+   This is the single source of truth for severity assignment. The
+   `### Approach check` section promotes substantiated `(questionable):` flags
+   into `### must-fix` as HIGH-severity findings — it does not separately
+   mutate Risk. Risk is whatever the rubric above evaluates to.
 
-   Each panelist starts its output with a `Goal:` line tagged `(clear)`,
-   `(clear, matches description)`, `(clear, contradicts description)`, or `(unclear)`.
-   Use those tags to decide what to print here:
-   - **All panelists agreed on a clear goal** — state the goal in one sentence and
-     move on. Example: `Goal: extract session-token validation into a reusable
-helper. Codex, claude, opencode all agree.`
-   - **Mixed clear / unclear** — surface the divergence. Quote what the unclear
-     panelist(s) said was ambiguous. The change being non-self-explanatory is itself
-     a HIGH-severity finding; add it to the action list.
-   - **Panelists described different goals** — the change is likely doing several
-     things at once or is genuinely confusing. Quote each panelist's goal verbatim
-     so the user can decide whether to split the PR.
-   - **Any panelist returned `Goal (clear, contradicts description):`** — quote what
-     they said the actual goal is vs. what the description claims. MEDIUM/HIGH worth
-     raising even if no one else flagged it.
+   Examples:
+   - `Risk: CRITICAL — codex flagged a verified timing-attack vulnerability in session-token validation at auth/session.go:88.`
+   - `Risk: LOW — docs-only change to the panel-review skill instructions; no consensus findings. Approach: sound.`
 
-   **Misinterpretation check (mandatory).** Beyond collating the `Goal:` tags,
-   independently verify that each panelist's stated goal is actually consistent
-   with what the diff does. A panelist can confidently tag itself `Goal (clear)`
-   while having misread the change — that produces confidently-wrong findings
-   further down. For each panelist:
+   **Misinterpretation check (mandatory; emits a callout only when triggered).**
+   Beyond collating the panelists' `Goal:` tags, independently verify that each
+   panelist's stated goal is actually consistent with what the diff does. A
+   panelist can confidently tag itself `Goal (clear)` while having misread the
+   change — that produces confidently-wrong findings further down. For each
+   panelist:
    1. Read the diff yourself (or the PR via `gh pr view --json files,title,body`
       and `gh pr diff <ref>`) to form an independent understanding of intent.
    2. Compare your read against the panelist's `Goal:` line.
-   3. If they disagree, that panelist **misinterpreted the change**. Surface
-      it as a top-level note under Goal check:
-      `- codex (gpt-5.5) appears to have misinterpreted the change. It said "<goal>" but the diff actually <what it really does>. Treat its findings below with skepticism — verify each one against the code before acting on it.`
+   3. If they disagree, emit a callout between `### Risk` and the next
+      section:
+
+      ```
+      **Misinterpretation detected:** codex (gpt-5) appears to have misinterpreted the change. It said "<goal>" but the diff actually <what it really does>. Treat its findings below with skepticism — verify each one against the code before acting on it.
+      ```
+
    4. Apply step 9's verification more aggressively to that panelist's
       findings: drop any whose substance depends on the misread intent; keep
       only findings that still hold independent of the panelist's mistaken
       framing.
 
-   Do not assume agreement among panelists implies correctness — two panelists
-   can share a misread (especially if the diff is unusual or the description
-   is misleading). When in doubt, your own read of the diff is the tiebreaker.
+   No misinterpretation → no callout. Do NOT emit a "no misinterpretations
+   detected" placeholder. Do not assume agreement among panelists implies
+   correctness — two panelists can share a misread (especially if the diff is
+   unusual or the description is misleading). When in doubt, your own read of
+   the diff is the tiebreaker.
 
-   ### Consensus findings
+   ### Goal check (only when goals contested)
 
-   Issues raised by 2+ panelists, deduplicated. Reference each panelist by name
-   AND the model it self-reported on its `Model:` line, so the user can see
-   which combinations agreed:
+   Each panelist starts its output with a `Goal:` line tagged `(clear)`,
+   `(clear, matches description)`, `(clear, contradicts description)`, or
+   `(unclear)`. Emit this section only when at least one of these holds:
+   - **Mixed clear / unclear** — surface the divergence. Quote what the
+     unclear panelist(s) said was ambiguous. The change being
+     non-self-explanatory is itself a HIGH-severity finding; add it to
+     `### must-fix`.
+   - **Panelists described different goals** — the change is likely doing
+     several things at once or is genuinely confusing. Quote each panelist's
+     goal verbatim so the user can decide whether to split the PR.
+   - **Any panelist returned `Goal (clear, contradicts description):`** —
+     quote what they said the actual goal is vs. what the description claims.
+     MEDIUM/HIGH worth raising even if no one else flagged it.
+
+   When all panelists agreed on a clear goal, omit this section entirely —
+   the Overview lead already states the goal in plain language.
+
+   ### Approach check (only when questionable verified)
+
+   Each panelist outputs an `Approach:` line immediately after `Goal:`, tagged
+   `(sound)` or `(questionable)`. This block asks whether the change is being
+   made at the right layer — a UI fix for a server bug, a client validator for
+   a missing DB constraint, etc.
+
+   Emit this section only when one of these holds:
+   - **One or more `Approach (questionable):` with all three evidence
+     components present** (root cause named, root-cause fix location
+     specified, reason the current change is symptomatic), and you verified
+     them against the code. Quote the substantiated claim:
+
+     ```
+     - questionable (raised by: codex (gpt-5.5)): the diff adds client-side validation in `web/src/forms/order.tsx:42`, but the root cause is that the `orders` table allows duplicate `(user_id, idempotency_key)` rows. Real fix lives in a migration on `orders`. This is the third caller to re-implement the same validation — grep shows two prior copies in `web/src/forms/`.
+     ```
+
+     Also promote this finding into `### must-fix` as a HIGH-severity entry
+     (use the named root-cause location in place of `file:line`).
+
+   - **Panelists disagree (one sound, another questionable)** — surface both
+     verdicts. The questionable side wins by default if its three evidence
+     components hold up under your own verification (apply step 9); if the
+     evidence doesn't hold, drop the questionable claim and note the
+     falsification under `### Disagreements`.
+
+   Otherwise — all-sound, or questionable claims dropped because evidence
+   didn't hold — omit this section. `Approach: sound.` appears inline at the
+   end of `### Risk` instead.
+
+   **Verify before promoting (mandatory).** Treat a `questionable` flag like
+   any unique CRITICAL/HIGH claim — open the named root-cause location,
+   confirm the bug actually recurs there or that the constraint is actually
+   missing, and only then surface it. A wrong `Approach (questionable):` is
+   worse than a missed one because it derails the entire review toward a
+   phantom redesign.
+
+   ### Findings buckets (must-fix / should-fix / polish)
+
+   The three severity buckets ARE the findings list — there are no separate
+   "Consensus" or "Unique" sections. Bucketing is by severity:
+   - `### must-fix` — CRITICAL and HIGH findings.
+   - `### should-fix` — MEDIUM findings.
+   - `### polish` — LOW findings.
+
+   Omit any bucket that has no entries — no empty headings, no "none" lines.
+
+   **Per-finding shape (CRITICAL / HIGH / MEDIUM):**
 
    ```
-   - [SEVERITY] path/to/file.ext:LINE — one-sentence issue
+   - [SEVERITY] file:line — one-sentence issue.
      Fix: one-sentence suggested change.
-     Raised by: codex (gpt-5.5), claude (claude-opus-4.7)
+     Flagged by: codex (gpt-5.5)
    ```
 
-   ### Unique findings
+   When 2+ panelists raised the same finding, list every panelist on the
+   `Flagged by:` line and prefix with the count. The count is the implicit
+   consensus signal — no separate "CONSENSUS" badge, no separate section:
 
-   Group by panelist. Use `### <name> (<model>)` as the per-panelist heading so
-   the model is visible alongside the findings. Only include findings no one
-   else mentioned that still pass the "would a competent reviewer ask for this
-   change" bar. Same shape (omit `Raised by:`, it's implicit in the grouping).
-   Apply step 9's verification before promoting a unique CRITICAL or HIGH
-   finding into the summary.
+   ```
+   - [MEDIUM] packages/evm/src/receipts.ts:130 + packages/evm/src/errors.ts:364 — `RETRYABLE_RPC_CODES` duplicated verbatim across two files.
+     Fix: export from errors.ts and import in receipts.ts.
+     Flagged by 2: claude (claude-opus-4.7), opencode (qwen3.6-plus)
+   ```
 
-   ### Disagreements
+   When panelists assigned different severities to the same finding, use the
+   higher and add a short note inline on the `Flagged by:` line:
 
-   If panelists contradict each other on a finding, surface it explicitly with
-   `file:line` for the disputed code. Do not pick a side; lay out both. Use step 9
-   verification if you can resolve the disagreement yourself.
+   ```
+   Flagged by 2: claude (claude-opus-4.7) [LOW], opencode (qwen3.6-plus) [MEDIUM] — using higher.
+   ```
 
-   ### Action list
+   **Per-finding shape (LOW).** Collapse to a single line. LOW items rarely
+   need a sentence of repair guidance; the issue description and `Flagged by:`
+   are enough:
 
-   `must-fix` (CRITICAL/HIGH) → `should-fix` (MEDIUM) → `polish` (LOW). One line per
-   item, each referencing `file:line` so the user can jump straight to it.
+   ```
+   - [LOW] packages/evm/src/broadcast.ts:299-307 — `stripSerialized` is unreachable post-`sanitizeMessage`. Flagged by: claude (claude-opus-4.7)
+   ```
+
+   If a LOW finding genuinely needs a `Fix:` line (e.g. the change is
+   non-obvious), keep the two-line shape — but ask yourself whether it
+   belongs in `### should-fix` instead.
+
+   **Per-finding shape (substantiated `Approach (questionable):`).** Lives
+   under `### must-fix` as a HIGH-severity entry. Use the named root-cause
+   location in place of `file:line`:
+
+   ```
+   - [HIGH] root cause: `orders` table allows duplicate `(user_id, idempotency_key)` rows — the diff adds client-side validation in `web/src/forms/order.tsx:42` that papers over it; this is the third caller to re-implement the same validation.
+     Fix: add a unique constraint on `orders(user_id, idempotency_key)` (or equivalent migration), then drop the per-caller client validators.
+     Flagged by: codex (gpt-5.5)
+   ```
+
+   Put the Approach entry at the top of `### must-fix` — if the approach is
+   wrong, the per-line findings below may not survive the rework.
+
+   **Order within a bucket.** Within a severity, items raised by more
+   panelists go first (consensus first), then single-flag items. Within a
+   tie, group by file path so related findings sit together. CRITICAL above
+   HIGH inside `### must-fix`.
+
+   **Dedup logic.** Two panelists raised the "same" finding when they cite
+   the same `file:line` (or overlapping ranges) AND the underlying claim is
+   substantively the same. A different fix suggestion at the same location
+   is still consensus on the bug; either pick the better fix and note the
+   other inline, or record both on the `Fix:` line as alternatives. A
+   different bug at the same line is NOT consensus — list as two separate
+   findings.
+
+   ### Disagreements (only when panelists actually contradict)
+
+   Emit this section only when panelists disagree on whether a piece of code
+   is buggy at all (one flags it, another examined the same code and said
+   it's fine), or when verification falsified a raised finding. Omit the
+   heading when there is nothing to surface — do NOT emit a "Disagreements:
+   none." line.
+
+   Surface each disagreement with `file:line` for the disputed code. Do not
+   pick a side unless step 9 verification resolves it; lay out both
+   positions. Severity-only splits (e.g. claude LOW vs opencode MEDIUM on
+   the same issue) do NOT belong here — those are noted inline on the
+   finding's `Flagged by:` line.
 
 9. **Verify questionable findings before surfacing them.** A panelist's finding is
    questionable when any of these holds:
@@ -301,7 +466,7 @@ helper. Codex, claude, opencode all agree.`
    For each questionable finding, open the actual diff/file (use `gh pr diff`,
    `gh api .../files`, or `Read` against the local checkout) and confirm the bug
    exists as described before surfacing it. If verification disproves the finding,
-   drop it and note the correction in the **Disagreements** section. If verification
+   drop it and note the correction in `### Disagreements`. If verification
    sharpens the finding (e.g., you find the right line number), promote the corrected
    version into the summary. Never repeat a panelist claim into the summary that you
    could have falsified in 30 seconds with a Read tool call.
@@ -333,15 +498,21 @@ step.
 
 **Procedure.** After step 7 (panelists finished, sections streamed) and _before_
 emitting step 8's synthesis, enumerate every finding from every panelist — CRITICAL
-through LOW, consensus and unique alike. If the user explicitly scoped the request
-("deep review the auth findings", "verify only the criticals"), apply the scope;
-otherwise default to all findings.
+through LOW, consensus and unique alike. Apply the same verification pass to every
+`Approach (questionable):` flag too: verify the three evidence components against the
+code, draft the actual cross-layer fix (often a migration / schema / API contract
+change, not a line edit), and explain how it resolves the symptom seen in the diff.
+If the user explicitly scoped the request ("deep review the auth findings", "verify
+only the criticals"), apply the scope; otherwise default to all findings _and_ all
+`Approach (questionable):` flags.
 
-1. **Create verification tasks.** Build one task per in-scope raw finding. Preserve
-   the original panelist, model, severity, `file:line`, claim, and `Fix:` line. If two
-   panelists raised the same underlying issue, each raw finding still gets represented
-   in a task; you may include the duplicate context for the verifier, but do not skip
-   a finding without counting it as intentionally out of scope.
+1. **Create verification tasks.** Build one task per in-scope raw finding, plus one
+   task per in-scope `Approach (questionable):` flag. Preserve the original panelist,
+   model, severity, `file:line` (or named root-cause location for Approach tasks),
+   claim, and `Fix:` line. If two panelists raised the same underlying issue, each
+   raw finding still gets represented in a task; you may include the duplicate context
+   for the verifier, but do not skip a finding without counting it as intentionally
+   out of scope.
 
 2. **Spin off verification subagents.** Launch a dedicated subagent for each task.
    If the harness caps concurrent subagents, queue them in small batches, but every
@@ -395,25 +566,43 @@ finding because the user scoped the request, say so:
 This declaration is the single source of truth for "did deep mode run" — if it isn't
 present, the synthesis was standard mode regardless of trigger phrasing.
 
-**Output shape.** Each finding entry in **Consensus findings**, **Unique findings**,
-and **Disagreements** expands from two lines to four:
+**Output shape.** Each finding entry in `### must-fix`, `### should-fix`,
+`### polish`, and `### Disagreements` expands from the standard 2-3 lines to
+five lines:
 
 ```md
-- [SEVERITY] [file:line](url) — one-sentence issue
+- [SEVERITY] [file:line](url) — one-sentence issue.
   Verification: verifier evidence (e.g. "read auth/session.go:80–96 — the
-    signature check at line 84 reads tok.claims before the cache load at line
-    88 acquires the mutex; a second goroutine can swap claims in the window").
-    Cite files/lines; do not assert without evidence.
+  signature check at line 84 reads tok.claims before the cache load at line
+  88 acquires the mutex; a second goroutine can swap claims in the window").
+  Cite files/lines; do not assert without evidence.
   Proposed fix: concrete change, with a code snippet for non-trivial cases,
-    anchored at file:line.
+  anchored at file:line.
   Why this fixes it: one or two sentences on the mechanism (e.g. "serializing
-    check + load behind the same mutex closes the TOCTOU window — no goroutine
-    can mutate claims between validation and use").
-  Raised by: codex (gpt-5.5), claude (claude-opus-4.7)
+  check + load behind the same mutex closes the TOCTOU window — no goroutine
+  can mutate claims between validation and use").
+  Flagged by 2: codex (gpt-5.5), claude (claude-opus-4.7)
 ```
 
-The **Action list** stays compact — one line per item — and references the expanded
-entries above.
+LOW findings in `### polish` still expand under deep mode — the one-line
+collapse only applies in standard mode.
+
+A substantiated `Approach (questionable):` entry in `### must-fix` follows the
+same five-line shape under deep mode, but the leading `file:line` is replaced
+with the root-cause location as in standard mode:
+
+```md
+- [HIGH] root cause: <named location> — <one-sentence summary of the wrong-layer fix>.
+  Verification: <how you confirmed the root cause exists and the current change is symptomatic>.
+  Proposed fix: <concrete cross-layer change — often a migration / schema / API contract change, not a line edit>, anchored at the root-cause location.
+  Why this fixes it: <one or two sentences on the mechanism — what invariant the cross-layer fix restores>.
+  Flagged by: codex (gpt-5.5)
+```
+
+If `### Approach check` is emitted as its own section (questionable flag
+verified), its quoted-panelist block stays as in standard mode — the
+verification and proposed-fix detail lives on the corresponding `### must-fix`
+entry, not duplicated in `### Approach check`.
 
 **If many findings drop during verification**, surface that in **Risk** — panelist
 signal-to-noise is part of the picture and worth telling the user about ("3 of 7 codex
