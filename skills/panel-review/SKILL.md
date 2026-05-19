@@ -71,6 +71,19 @@ When _not_ to use:
      invocation. When in doubt, also list nearby open PRs
      (`gh pr list --author "@me" --state open --json number,title,headRefName`)
      so the user can pick from a concrete menu rather than retype a branch name.
+   - **If PR auto-detection succeeds but the script later dies with
+     `--pr --checkout: failed to resolve PR url/SHA/head-repo`** (most commonly
+     because `gh pr view` returned an empty `headRepository.nameWithOwner` and
+     the PR head SHA isn't already in this local repo so the SHA shortcut
+     couldn't kick in), the die message will quote the PR's `baseRefName` and
+     suggest a concrete fallback target. Re-run with
+     `--base origin/<baseRefName>` so the diff scope still matches the PR. Do
+     NOT silently retry with `--uncommitted` or local `--base main` — local
+     `main` may be behind `origin/main` and silently expand the review scope
+     beyond what the PR contains. After the relaunch, confirm the script's first
+     scope-echo heartbeat
+     (`panel-review: scope vs <base>: N commits, M files changed, K insertions(+), L deletions(-)`)
+     matches the PR's own commit count before trusting the synthesized findings.
 2. **Pick panelists.** Default: every supported CLI on `PATH` (codex, claude,
    opencode). The user may name a subset.
 3. **Capture optional focus.** If the user gave context ("look closely at the

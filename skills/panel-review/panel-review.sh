@@ -349,52 +349,69 @@ if (( CHECKOUT_MODE )); then
         gh pr view "$pr_ref" --json url,headRefOid,headRepository \
                   -q '.url, .headRefOid, .headRepository.nameWithOwner' 2>"$gh_err" || true
       )
-      # jq prints the literal string "null" (not empty) for missing object
-      # fields when used with -q, so an emptiness check alone misses the
-      # deleted-fork case. Reject "null" explicitly with a tailored message
-      # since the recovery (use --uncommitted) is fork-specific.
-      if [[ "$pr_head_nwo" == "null" ]]; then
-        die "--pr: PR #${pr_num} head repository has been deleted (likely a deleted fork); cannot create a worktree. Use --uncommitted to review local edits instead, or pass an explicit --commit <sha> if you have the head commit locally."
+      # Before falling back to remote fetch, see if the head SHA is already in
+      # our local object DB. Common case: reviewer is on the PR branch and
+      # local HEAD == PR head, so a fetch is just a network round-trip to
+      # confirm what we already have. The shortcut also sidesteps any
+      # gh-pr-view quirks (empty nameWithOwner returned for some same-repo PRs,
+      # deleted-fork PRs whose head SHA was already mirrored locally) — we
+      # only need a remote URL when the object is actually missing.
+      if [[ -n "$pr_head_sha" ]] && git cat-file -e "${pr_head_sha}^{commit}" 2>/dev/null; then
+        echo "panel-review: --pr: head SHA ${pr_head_sha} already in local repo, skipping fetch" >&2
+        WORKTREE_REF="$pr_head_sha"
+      else
+        # Need to fetch from the head repo. From here on, pr_head_nwo must be
+        # a usable owner/repo string. jq prints the literal "null" (not empty)
+        # for missing object fields when used with -q, so an emptiness check
+        # alone misses the deleted-fork case — reject "null" explicitly.
+        if [[ "$pr_head_nwo" == "null" ]]; then
+          die "--pr: PR #${pr_num} head repository has been deleted (likely a deleted fork) and head SHA ${pr_head_sha:-(unknown)} is not in this local repo. Recovery: --base origin/${pr_base:-<base-branch>} (reviews against the PR's base branch) or --uncommitted (reviews your local edits)."
+        fi
+        if [[ -z "$pr_url" || -z "$pr_head_sha" || -z "$pr_head_nwo" ]]; then
+          msg="--pr --checkout: failed to resolve PR url/SHA/head-repo via 'gh pr view ${pr_ref}'."
+          msg+=$'\n  gh returned: url='"'${pr_url:-}'"' head_sha='"'${pr_head_sha:-}'"' head_nwo='"'${pr_head_nwo:-}'"
+          [[ -s "$gh_err" ]] && msg+=$'\n  gh stderr: '"$(cat "$gh_err")"
+          msg+=$'\n  Recovery: re-run with --base origin/'"${pr_base:-<base-branch>}"' to review against the PR'\''s base branch'
+          [[ -n "$pr_head_sha" ]] && msg+=", or --commit ${pr_head_sha} if you have that commit locally"
+          msg+=$'.'
+          die "$msg"
+        fi
+        # Mirror origin's URL shape (SSH vs HTTPS) so the fetch uses whatever
+        # auth this machine has already set up. Hardcoding HTTPS hangs on a
+        # credential prompt for users with SSH-only auth and no HTTPS
+        # credential helper. Falls back to HTTPS (host derived from pr_url so
+        # GitHub Enterprise works) when origin is missing or in an
+        # unrecognized shape.
+        pr_host="$(echo "$pr_url" | sed -E 's|^(https?://[^/]+)/.*|\1|')"
+        pr_head_https_url="${pr_host}/${pr_head_nwo}.git"
+        origin_url="$(git remote get-url origin 2>/dev/null || true)"
+        case "$origin_url" in
+          ssh://*)
+            # ssh://[user@]host[:port]/owner/repo[.git]
+            ssh_authority="${origin_url#ssh://}"
+            ssh_authority="${ssh_authority%%/*}"
+            pr_head_url="ssh://${ssh_authority}/${pr_head_nwo}.git"
+            ;;
+          *://*)
+            # https/http/git/file URL — use HTTPS fallback.
+            pr_head_url="$pr_head_https_url"
+            ;;
+          *:*)
+            # SCP-like SSH: [user@]host:path. The bare `host:path` form (no
+            # user@) is common with ~/.ssh/config Host aliases like
+            # `github-work:owner/repo.git`, so we don't require `@`. The
+            # earlier *://* arm has already consumed every URL-form remote,
+            # so any colon left here is the SCP separator.
+            pr_head_url="${origin_url%%:*}:${pr_head_nwo}.git"
+            ;;
+          *)
+            pr_head_url="$pr_head_https_url"
+            ;;
+        esac
+        git fetch --quiet "$pr_head_url" "$pr_head_sha" >&2 \
+          || die "git fetch $pr_head_url $pr_head_sha failed"
+        WORKTREE_REF="$pr_head_sha"
       fi
-      if [[ -z "$pr_url" || -z "$pr_head_sha" || -z "$pr_head_nwo" ]]; then
-        msg="--pr --checkout: failed to resolve PR url/SHA/head-repo via gh pr view"
-        [[ -s "$gh_err" ]] && msg+=$'\n  gh stderr: '"$(cat "$gh_err")"
-        die "$msg"
-      fi
-      # Mirror origin's URL shape (SSH vs HTTPS) so the fetch uses whatever
-      # auth this machine has already set up. Hardcoding HTTPS hangs on a
-      # credential prompt for users with SSH-only auth and no HTTPS credential
-      # helper. Falls back to HTTPS (host derived from pr_url so GitHub
-      # Enterprise works) when origin is missing or in an unrecognized shape.
-      pr_host="$(echo "$pr_url" | sed -E 's|^(https?://[^/]+)/.*|\1|')"
-      pr_head_https_url="${pr_host}/${pr_head_nwo}.git"
-      origin_url="$(git remote get-url origin 2>/dev/null || true)"
-      case "$origin_url" in
-        ssh://*)
-          # ssh://[user@]host[:port]/owner/repo[.git]
-          ssh_authority="${origin_url#ssh://}"
-          ssh_authority="${ssh_authority%%/*}"
-          pr_head_url="ssh://${ssh_authority}/${pr_head_nwo}.git"
-          ;;
-        *://*)
-          # https/http/git/file URL — use HTTPS fallback.
-          pr_head_url="$pr_head_https_url"
-          ;;
-        *:*)
-          # SCP-like SSH: [user@]host:path. The bare `host:path` form (no
-          # user@) is common with ~/.ssh/config Host aliases like
-          # `github-work:owner/repo.git`, so we don't require `@`. The earlier
-          # *://* arm has already consumed every URL-form remote, so any colon
-          # left here is the SCP separator.
-          pr_head_url="${origin_url%%:*}:${pr_head_nwo}.git"
-          ;;
-        *)
-          pr_head_url="$pr_head_https_url"
-          ;;
-      esac
-      git fetch --quiet "$pr_head_url" "$pr_head_sha" >&2 \
-        || die "git fetch $pr_head_url $pr_head_sha failed"
-      WORKTREE_REF="$pr_head_sha"
       ;;
     base:*)
       WORKTREE_REF="$(git rev-parse HEAD)"
@@ -403,6 +420,34 @@ if (( CHECKOUT_MODE )); then
       WORKTREE_REF="${TARGET#commit:}"
       ;;
   esac
+
+  # Echo resolved scope so the coordinator notices when reality diverges from
+  # expectation. Canonical case: `--base main` against a local `main` that's
+  # behind `origin/main` silently reviews extra commits not in the PR — the
+  # scope line surfaces that the first time the script runs, rather than
+  # after panelists return findings about unrelated code.
+  scope_base_ref=""
+  case "$TARGET" in
+    pr:*)
+      # Only echo a scope line when we can compute it locally. The PR's base
+      # is on the remote (origin/<pr_base>); if the user hasn't fetched it,
+      # skip rather than guess. Panelists fetch it themselves via gh.
+      if [[ -n "${pr_base:-}" ]] && git rev-parse --verify "origin/${pr_base}" >/dev/null 2>&1; then
+        scope_base_ref="origin/${pr_base}"
+      fi
+      ;;
+    base:*)
+      scope_base_ref="${TARGET#base:}"
+      ;;
+    commit:*)
+      scope_base_ref="${WORKTREE_REF}^"
+      ;;
+  esac
+  if [[ -n "$scope_base_ref" ]] && git rev-parse --verify "$scope_base_ref" >/dev/null 2>&1; then
+    n_commits=$(git rev-list --count "${scope_base_ref}..${WORKTREE_REF}" 2>/dev/null || echo "?")
+    shortstat=$(git diff --shortstat "${scope_base_ref}...${WORKTREE_REF}" 2>/dev/null | sed 's/^ *//')
+    echo "panel-review: scope vs ${scope_base_ref}: ${n_commits} commits, ${shortstat:-no diff}" >&2
+  fi
 
   # Register cleanup BEFORE the creation loop. If `git worktree add` fails partway
   # through (disk full, ref doesn't exist after a fetch race, etc.), die() exits
