@@ -20,7 +20,7 @@ Just ask Claude Code in plain English — the skill picks up the target and pane
 - "panel review the auth changes, focus on session handling"
 - "panel review with just codex and claude"
 
-Add "deep" / "verify each finding" / "dig into the findings" to opt into deep mode: the coordinator independently confirms every finding against the code, drafts a concrete fix, and explains how the fix resolves the issue. Token-heavy — routine reviews should stick with the standard synthesis.
+Add "deep" / "verify each finding" / "dig into the findings" to opt into deep mode: after the panelists finish, the coordinator spins off verification subagents for every finding, then synthesizes their evidence, concrete fixes, and fix rationale. Token-heavy — routine reviews should stick with the standard synthesis.
 
 ## What it does
 
@@ -33,7 +33,7 @@ Add "deep" / "verify each finding" / "dig into the findings" to opt into deep mo
 
 ## Gotchas
 
-- **Background Bash + `BashOutput` polling is required.** Codex dominates wall clock, so foreground calls block silently for minutes. Do not launch via the `Agent` tool / subagents — there's no streaming-output API for in-flight subagents and the heartbeats become invisible.
+- **Background Bash + `BashOutput` polling is required.** Codex dominates wall clock, so foreground calls block silently for minutes. Do not launch `panel-review.sh` via the `Agent` tool / subagents — there's no streaming-output API for in-flight subagents and the heartbeats become invisible. Deep mode's post-processing verification subagents are the exception, and only run after panelists finish.
 - **Worktree mode is strictly less safe than the local-diff mode.** It gives panelists write/exec access in their worktree and shares your parent repo's `.git` objects, so a stray `git push` from a panelist would publish from your machine. The prompt forbids it, but the prompt is a firewall, not a sandbox.
 - **Diff-embed targets cap at 200KB.** `--base` / `--commit` reviews of big rename / refactor changes blow past it — bump `PANEL_REVIEW_MAX_DIFF_BYTES` rather than trimming. PR mode bypasses this cap entirely (no embedded diff).
 - Panelists pick up the project's `AGENTS.md` / `CLAUDE.md` — that's intentional, but worth knowing if the file biases their review.
