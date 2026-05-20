@@ -70,17 +70,27 @@ Write `CLAUDE.md` with a single line: `@AGENTS.md`
 
 This gives wider tool support — `AGENTS.md` is read natively by Claude Code, Codex CLI, Cursor, Copilot, Gemini CLI, and Windsurf — while preserving Claude Code's import behavior.
 
-**Exception:** if the project has genuinely Claude-specific content (plan mode, specific skills, Claude Code hooks), put it below the import:
+**Exception:** if the project has genuinely Claude-specific content (compaction behavior, Claude Code hooks), put it below the import:
 
 ```markdown
 @AGENTS.md
 
 ## Claude-specific
 
-- Use plan mode for changes in src/billing/
+- When compacting, preserve the full list of modified files and any test commands.
 ```
 
-Only do this for behaviors other tools don't share. Cross-tool rules belong in `AGENTS.md`.
+Only do this for behaviors other tools don't share **and** that don't have a better home. Many Claude-specific behaviors belong in subagent frontmatter, hooks, or `settings.json` instead — see the next section. Cross-tool rules belong in `AGENTS.md`.
+
+## Pushing content out of the always-loaded budget
+
+`AGENTS.md` and `CLAUDE.md` load every session. When something doesn't need to load every session, push it to a venue that loads on demand or that enforces deterministically:
+
+- **`.claude/rules/*.md` with `paths:` frontmatter** — loads on demand when Claude touches a matching file (e.g. `paths: ["apps/billing/**"]`). Rules without `paths:` load unconditionally at startup at the same priority as `CLAUDE.md`. Known bug: user-level `~/.claude/rules/` files with `paths:` silently never fire — keep path-scoped rules at the project level only ([gh #21858](https://github.com/anthropics/claude-code/issues/21858)).
+- **Skills** — load conditionally based on description match. Right home for deployment runbooks, niche API patterns, migration guides, anything that's only relevant in a small slice of sessions.
+- **Subagents** — for behavioral rules that should bind a specific worker (e.g. "review subagents always run on Haiku", "the research subagent is restricted to read-only `permissionMode`"). Declare in subagent frontmatter (`model`, `tools`, `permissionMode`, `skills`, `hooks`, etc.) rather than in always-loaded prose — the rule then only takes effect when that subagent runs. Subagents are invoked deliberately, not auto-attached to file paths; for path-scoped rules use `.claude/rules/` instead.
+- **`.claude/settings.json`** — for deterministic behavior, not guidance.
+- **Hooks** — for hard requirements that must never be violated.
 
 ## What earns its place
 
@@ -109,10 +119,12 @@ When pruning, err on the side of cutting. If you're uncertain whether a line ear
 
 Apply these to every line.
 
-**Imperative, not descriptive.**
+**Imperative for behaviors, declarative for facts.** Behaviors are rules the model should follow; facts describe the project. Phrasing facts as imperatives ("YOU MUST use bun") can trip prompt-injection defenses and cause Claude to surface the text to the user instead of treating it as context.
 
-- Yes: `Use named exports exclusively.`
-- No: `It's preferred that default exports be avoided.`
+- Yes (behavior): `Use named exports exclusively.`
+- Yes (fact): `This repo uses bun for package management and tests.`
+- No (behavior, descriptive): `It's preferred that default exports be avoided.`
+- No (fact, imperative): `YOU MUST use bun for package management.`
 
 **Positive, not negative.** Negated concepts still activate the concept being negated — flipping negatives to positives has been shown to cut rule violations roughly in half.
 
@@ -133,6 +145,8 @@ Specific negative rules are OK when they describe a concrete failure mode Claude
 **Use MUST / IMPORTANT sparingly.** Reserve them for 3-5 rules that truly cannot be broken. If everything is IMPORTANT, nothing is.
 
 **Document domain concepts, not file paths.** "Authentication uses session tokens with Redis-backed storage" survives refactors; "auth logic lives in src/auth/handlers.ts" breaks the moment someone moves the file.
+
+**Use HTML comments for maintainer notes.** `<!-- ... -->` blocks are stripped before injection into Claude's context. Use them to record why a rule exists or which incident motivated it — context that helps future humans audit the file without spending Claude's token budget.
 
 **Primacy and recency anchoring.** LLMs weight the beginning and end of context most heavily. Put the 3 most-critical rules in the first section _and_ the last section, with intentional duplication. Less critical content goes in the middle.
 
@@ -209,7 +223,12 @@ When asked to audit, clean up, or update an existing `CLAUDE.md` or `AGENTS.md`:
 2. **Propose the pruned version to the user before writing.** Show what's being kept, what's being cut, and why. The user may want to rescue something you flagged as filler because of context you don't have.
 3. **Preserve failure-driven rules.** If a line looks odd but specific ("don't add event handlers when the framework handles reactivity"), it probably exists because of a real incident. Keep it unless the user confirms it's obsolete.
 4. **Consolidate, don't duplicate.** If the project has both `CLAUDE.md` and `AGENTS.md`, merge into `AGENTS.md` and replace `CLAUDE.md` with `@AGENTS.md`.
-5. **Flag graduation candidates.** Rules like "always run the formatter" or "never commit without typechecking" should graduate to hooks or pre-commit checks — note these to the user even though this skill won't implement them.
+5. **Flag graduation candidates.** Each rule type has a venue that suits it better than always-loaded prose. Note these to the user even though this skill won't implement them:
+   - Preferences → stay in `AGENTS.md`.
+   - Deterministic behaviors → `.claude/settings.json`.
+   - Hard requirements → hooks or CI.
+   - Behavioral rules bound to a specific worker → subagent frontmatter (e.g. `model`, `permissionMode`, `tools`).
+   - Specialized domain knowledge → a Skill, or `.claude/rules/` with `paths:` frontmatter.
 
 ## Final checks
 
@@ -218,7 +237,8 @@ Re-read the draft against this checklist before writing the file:
 - [ ] Under 120 lines? (Target 60-80.)
 - [ ] Does every line pass the litmus test ("would removing this cause a mistake")?
 - [ ] Does every prohibition have a rationale and an alternative?
-- [ ] Imperative and positive phrasing throughout?
+- [ ] Behaviors phrased imperatively, facts phrased declaratively?
+- [ ] Any prohibitions describe a concrete failure mode with both rationale and alternative?
 - [ ] MUST / IMPORTANT used at most 3-5 times?
 - [ ] Top 3 rules mirrored at the start and end?
 - [ ] No code snippets that will go stale?
@@ -232,6 +252,6 @@ If any check fails, fix it before writing.
 
 # CRITICAL — Read last
 
-- **Wire `CLAUDE.md` to `@AGENTS.md`.** One source of truth, every AI tool reads it. Put Claude-specific rules under the import, not in a separate file.
+- **Wire `CLAUDE.md` to `@AGENTS.md`.** One source of truth, every AI tool reads it. Add Claude-specific rules below the import only when they're genuinely Claude-only and have no better on-demand or deterministic venue.
 - **Ruthless curation over completeness.** Every line competes for a finite compliance budget. When in doubt, cut.
 - **Every prohibition carries rationale + alternative.** Let the model generalize instead of memorizing.
