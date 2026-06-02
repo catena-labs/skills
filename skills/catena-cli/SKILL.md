@@ -7,7 +7,7 @@ description: >-
   Use when an AI agent needs to move USD for a Catena customer, check balances,
   create counterparties, or follow an intent to a terminal state.
 metadata:
-  version: "0.0.1"
+  version: "0.0.2"
 ---
 
 # Catena Bank Agent CLI
@@ -46,6 +46,17 @@ Use `npx -y catena-cli unlink --profile <name>` to disconnect only the selected
 local profile and remove its credential. `--profile` defaults the same way as
 other commands.
 
+### Profiles
+
+One machine can hold several linked agents. Any command takes `--profile
+<name>`; without it the default is used.
+
+```bash
+npx -y catena-cli profiles current    # selected profile + its bankUrl/agentId
+npx -y catena-cli profiles list       # all profiles; marks the default
+npx -y catena-cli profiles use <name> # set the default (must be linked)
+```
+
 ## Read Commands
 
 Run the relevant reads before composing money movement:
@@ -57,13 +68,16 @@ npx -y catena-cli accounts list
 npx -y catena-cli counterparties list
 ```
 
-- `policy show`: read which actions are allowed for each account, plus caps,
-  approval thresholds, counterparty creation rules, and any limits on which
-  counterparties can receive sends. Do not work around policy.
-- `accounts list`: use returned `acct_…` ids for `--account`, `--from`, and
-  `--to`.
-- `counterparties list`: required for sends; use returned rail ids (`cprl_…`),
-  not counterparty ids, for `send --rail`.
+- `policy show`: `policyCapabilities[]` each grant one `query_balance`, `read`,
+  `send`, or `transfer` capability on one account, with block/approval `rules`
+  (per-transaction and time-windowed amount/count caps). `counterpartyRules`
+  sets send-recipient scope (`open`/`restricted`, `allowedCounterparties`) and
+  whether the agent may create counterparties. Do not work around policy.
+- `accounts list`: under `.accounts[]`; use each `id` (`acct_…`) for
+  `--account`, `--from`, `--to`.
+- `counterparties list`: required for sends. Under `.counterparties[]`, each
+  with `rails[]`. Use a rail `id` (`cprl_…`), not the counterparty id, for
+  `send --rail`.
 
 ## Counterparties
 
@@ -94,17 +108,30 @@ npx -y catena-cli counterparties create wallet \
 ```
 
 `counterparties create wallet` required flags: `--name`, `--address`,
-`--network`. Optional: `--email`.
+`--network` (only `base` today). Optional: `--email`.
+
+Both return an intent envelope; on `completed` the new counterparty (with its
+`rails[].id` for a follow-up `send`) is on `.data.counterparty`. Creation routed
+to approval is `pending` — re-check with `intents get`.
 
 ## Intents
 
-Intents are the only way the agent reads or moves money. Terminal statuses:
-`completed`, `denied`, `blocked`, `failed`, `expired`. Treat `pending_approval`
-as terminal-for-the-agent; only an operator can move it forward. Re-check later
-with `intents get`.
+Intents move money and create counterparties (balance reads do not — see
+`accounts balance`). `.status` is always one of these simplified values:
 
-Intent `reasons` explain policy decisions. Summarize them in plain language when
-an intent is blocked, denied, or routed to approval.
+| `.status`    | Meaning                              | Terminal?          |
+| ------------ | ------------------------------------ | ------------------ |
+| `completed`  | Succeeded.                           | yes                |
+| `blocked`    | Stopped by policy (incl. denied).    | yes                |
+| `failed`     | Execution failed (incl. expired).    | yes                |
+| `pending`    | Awaiting human approval.             | terminal-for-agent |
+| `processing` | Accepted, still in flight.           | no — re-check      |
+
+Raw `denied`/`expired`/`pending_approval` fold into `blocked`/`failed`/`pending`
+— never match the raw strings. `pending` is terminal-for-the-agent (only an
+operator advances it). Re-check `processing` (and later `pending`) with `intents
+get`. `reasons` (string array) explains the decision — summarize it when an
+intent is blocked or routed to approval.
 
 USD is the only supported asset. Pass `--amount` as a decimal string such as
 `100.50`; do not use scientific notation or signed values.
@@ -115,8 +142,8 @@ Before `send` or `transfer`:
 - Run `policy show`; do not bypass caps or approval thresholds.
 - Use ids from `accounts list` and `counterparties list`.
 - Prefer `--wait` unless the user asked for fire-and-follow-up.
-- Do not retry ambiguous movement unless `intents get` confirms failure or
-  denial.
+- Do not retry ambiguous movement unless `intents get` confirms a `blocked` or
+  `failed` status.
 
 ### `send`
 
@@ -145,13 +172,12 @@ Required: `--from`, `--to`, `--amount`. Optional: `--memo`, `--description`,
 
 ### `accounts balance`
 
-Requests a balance through the policy engine.
+A direct read, not an intent (no `--wait`). Returns `{ "accountId": …,
+"balance": … }`.
 
 ```bash
 npx -y catena-cli accounts balance acct_…
 ```
-
-The completed balance result is on `.data`.
 
 ### `intents get`
 
@@ -166,14 +192,15 @@ Use this for `pending_approval`, timeout, or no-`--wait` follow-up.
 Without `--wait`, `send` and `transfer` print the created intent and exit 0 even
 if the intent later fails. Inspect `.status` and `.reasons`.
 
-With `--wait`, the CLI polls for up to 60 seconds, prints the latest intent, and
-exits:
+With `--wait`, the CLI polls while `processing` (1s interval, 60s max), prints
+the latest intent, and exits. A `pending` intent returns immediately, not at
+timeout.
 
-| Exit | Meaning                                           |
-| ---- | ------------------------------------------------- |
-| `0`  | `completed`                                       |
-| `1`  | `denied`, `blocked`, `failed`, or `expired`       |
-| `2`  | still in-flight at timeout, or `pending_approval` |
+| Exit | `.status`                                       |
+| ---- | ----------------------------------------------- |
+| `0`  | `completed`                                     |
+| `1`  | `blocked` or `failed`                           |
+| `2`  | `pending`, or still `processing` at 60s timeout |
 
 ## Configuration
 
@@ -186,8 +213,8 @@ exits:
 When chaining commands, parse stdout as JSON rather than scraping text:
 
 ```bash
-ACCT=$(npx -y catena-cli accounts list | jq -r '.[0].id')
-RAIL=$(npx -y catena-cli counterparties list | jq -r '.[0].rails[0].id')
+ACCT=$(npx -y catena-cli accounts list | jq -r '.accounts[0].id')
+RAIL=$(npx -y catena-cli counterparties list | jq -r '.counterparties[0].rails[0].id')
 npx -y catena-cli send \
   --account "$ACCT" --rail "$RAIL" --amount 10.00 --method ach --wait
 ```
