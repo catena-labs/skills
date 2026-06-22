@@ -9,7 +9,7 @@ description: >-
   get a deposit address, create counterparties, or follow an intent to a
   terminal state.
 metadata:
-  version: "0.0.5"
+  version: "0.0.4"
 ---
 
 # Catena Bank Agent CLI
