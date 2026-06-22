@@ -9,7 +9,7 @@ description: >-
   get a deposit address, create counterparties, or follow an intent to a
   terminal state.
 metadata:
-  version: "0.0.4"
+  version: "0.0.5"
 ---
 
 # Catena Bank Agent CLI
@@ -95,14 +95,30 @@ Three direct per-account reads — plain reads, not intents:
 
 ## Counterparties
 
-Create counterparties only when `counterpartyRules` allow it. Two rail types,
-each with its own flags (run `counterparties create bank --help` /
-`counterparties create wallet --help`):
+Create counterparties only when `counterpartyRules` allow it. `counterparties
+create` takes the rail as a **positional** (`bank` or `wallet`) followed by
+flags — there are no `create bank` / `create wallet` subcommands. Every flag for
+both rails appears on the single `counterparties create --help` screen, and that
+help marks only the rail and `--name` as required even though each rail needs
+more. Pass the full set below; missing required flags fail one at a time.
 
-- **bank** — you'll need the name, bank name, routing number, account number,
-  and a US street address; optional `--account-type checking|savings`.
-- **wallet** — `--name` and `--address` (a `0x…` address or an ENS name);
-  `--network` defaults to `base`, the only network today.
+- **bank** — all required: `--name`, `--bank-name`, `--routing-number`,
+  `--account-number`, and the four address parts `--address-street`,
+  `--address-city`, `--address-state`, `--address-postal-code`. Optional:
+  `--account-type checking|savings` (default checking), `--address-country`
+  (default USA), and `--email`.
+- **wallet** — required: `--name` and `--address` (a `0x…` address or an ENS
+  name). Optional: `--network` (defaults to `base`, the only network today) and
+  `--email`.
+
+```bash
+npx -y catena-cli counterparties create bank --name "Acme Inc" \
+  --bank-name "First Bank" --routing-number 123456789 \
+  --account-number 000123456 --address-street "123 Main St" \
+  --address-city "New York" --address-state NY --address-postal-code 10001
+npx -y catena-cli counterparties create wallet --name "Acme Wallet" \
+  --address 0xAbC0000000000000000000000000000000000000
+```
 
 Both return an intent envelope. On `completed` the new counterparty — with its
 `rails[].id` for a follow-up `send` — is on `.data.counterparty`. Creation
